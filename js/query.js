@@ -11,6 +11,9 @@ import { corpus } from './corpus.js';
 
 export const FIELDS = {
   tag: 'тег (учитывает вложенные: tag:проект найдёт проект/ереван)',
+  класс: 'класс памяти: сущность, утверждение, событие, улика, выводимое',
+  вид: 'вид внутри класса: человек, проект, факт, решение, правило, журнал…',
+  о: 'утверждения о сущности: о:Ксюша, о:pbcheck',
   type: 'тип заметки: note, person, task, daily, log, card…',
   zone: 'папка: brain, people, projects…',
   status: 'статус из фронтматтера: active, done…',
@@ -64,6 +67,12 @@ function matchOne(note, f) {
   const v = f.raw.toLowerCase();
   switch (f.key) {
     case 'tag': return (note.tags || []).some(t => t === v || t.startsWith(v + '/'));
+    case 'класс': return (note.klass || '').toLowerCase() === v;
+    case 'вид': return (note.kind || '').toLowerCase() === v;
+    // «о» ищет по обе стороны связи: и утверждения про сущность, и сущность,
+    // про которую есть утверждения, — спрашивают и так, и так.
+    case 'о': return (note.links || []).some(l => l.type === 'about' && l.to.title.toLowerCase().includes(v))
+      || (note.backlinks || []).some(l => l.type === 'about' && l.from.title.toLowerCase().includes(v));
     case 'type': return (note.type || '').toLowerCase() === v;
     case 'zone': return (note.zone || '').toLowerCase().includes(v);
     case 'status': return (note.status || '').toLowerCase() === v;

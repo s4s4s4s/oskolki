@@ -108,9 +108,14 @@ function buildZones(notes, prevOn) {
    SAT (сотни файлов и растут) раньше просто вырезались сборщиком; теперь они в
    карте есть, но слой по умолчанию выключен. Решение «показывать или нет»
    принимает человек, а не сборщик, и передумать можно без пересборки. */
+/* Слои — это классы памяти, а не поля `type`. Раньше в одном списке лежали
+   `note`, `person`, `card` — вид, роль и происхождение вперемешку, и выключить
+   «всё машинное» одним нажатием было нельзя. Класс отвечает ровно на этот
+   вопрос: сущности и утверждения — знание, улики — доказательства, выводимое —
+   то, что сделала машина и что на карте знания только мешает. */
 function buildLayers(notes, prevOn) {
   const counts = new Map();
-  for (const n of notes) counts.set(n.type || '—', (counts.get(n.type || '—') || 0) + 1);
+  for (const n of notes) counts.set(n.klass || n.type || '—', (counts.get(n.klass || n.type || '—') || 0) + 1);
   return [...counts].sort((a, b) => b[1] - a[1]).map(([name, count]) => ({
     name, count,
     on: prevOn.has(name) ? prevOn.get(name) : !HIDDEN_LAYERS.includes(name),
@@ -126,6 +131,12 @@ export function buildFromMap(map) {
     title: n.t || baseOf(n.p),
     zone: '',
     type: n.ty || '',
+    // Класс — поведение объекта (сущность, утверждение, событие, улика,
+    // выводимое), вид — что он такое внутри класса. Старое `type` осталось для
+    // совместимости, но решения принимаются по классу: он единственный говорит,
+    // стареет ли объект и может ли он противоречить другому.
+    klass: n.kl || '',
+    kind: n.kt || '',
     status: n.st || '',
     tags: n.tg || [],
     headings: n.hd || [],
@@ -273,7 +284,7 @@ export const layerOn = type => {
   const l = corpus.layers.find(x => x.name === (type || '—'));
   return l ? l.on : true;
 };
-export const isVisible = n => n.zoneRef?.on !== false && layerOn(n.type);
+export const isVisible = n => n.zoneRef?.on !== false && layerOn(n.klass || n.type);
 
 /* ── поиск ────────────────────────────────────────────────────────────────── */
 

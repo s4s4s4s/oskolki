@@ -112,11 +112,14 @@ export const LINK_TYPES = [
   { key: 'supersedes', label: 'ЗАМЕНЯЕТ', hint: 'делает прежнее устаревшим' },
   { key: 'source', label: 'ИСТОЧНИК', hint: 'откуда это взялось' },
   { key: 'contradicts', label: 'ПРОТИВОРЕЧИТ', hint: 'спорит с этим' },
+  // Несущая связь новой схемы: утверждение вешается на сущности, о которых оно.
+  { key: 'about', label: 'О КОМ / О ЧЁМ', hint: 'сущности, к которым крепится утверждение' },
 ];
 // Как эти поля названы в карте (сборщик сводит синонимы к одному имени).
 export const TYPE_OF_FIELD = {
   relates: 'relates', depends_on: 'depends', blocks: 'blocks',
   part_of: 'part_of', supersedes: 'supersedes', source: 'source', contradicts: 'contradicts',
+  about: 'about',
 };
 export const FIELD_OF_TYPE = Object.fromEntries(Object.entries(TYPE_OF_FIELD).map(([f, t]) => [t, f]));
 
