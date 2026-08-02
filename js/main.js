@@ -1,5 +1,5 @@
 // Точка входа: загрузка, роутер, верхняя/нижняя полосы, живой канал, клавиатура.
-import { getSettings, saveSettings, clearSettings, initTransport, liveChannel, transport } from './api.js';
+import { getSettings, saveSettings, clearSettings, initTransport, liveChannel, transport, IS_NATIVE } from './api.js';
 import { fetchIndex, buildModel, applyModel, corpus } from './corpus.js';
 import { renderConnect, renderGraph, renderNote, renderCards, renderSearch, renderAsk, initCapture, initNoteCreator, toast, notePush, $ } from './views.js';
 import { IS_APP, INDEX_REBUILD_MS } from './config.js';
@@ -64,7 +64,7 @@ async function boot() {
   initTransport(s);
   view.innerHTML = `<div class="splash"><span class="gem"></span><span class="st" id="boot-st">ПОДКЛЮЧАЮСЬ…</span></div>`;
 
-  const cache = await loadIndexCache(s.demo ? 'demo' : s.url);
+  const cache = await loadIndexCache(cacheKey(s));
   let shown = false;
   if (cache?.chunks?.length) {
     applyModel(buildModel(cache.chunks, cache.meta, cache.synonyms), { fromCache: cache.at });
@@ -78,7 +78,7 @@ async function boot() {
     const raw = await fetchIndex(msg => { const b = $('#boot-st'); if (b) b.textContent = msg.toUpperCase(); });
     applyModel(buildModel(raw.chunks, raw.meta, raw.synonyms));
     state.offline = null;
-    saveIndexCache(s.demo ? 'demo' : s.url, raw);
+    saveIndexCache(cacheKey(s), raw);
   } catch (e) {
     if (shown) {                       // копия уже на экране — сеть подождёт
       toast(`СВЕЖИЙ ИНДЕКС НЕ ПРИШЁЛ: ${(e.message || e).toString().toUpperCase()} · ПОКАЗАНА ОФЛАЙН-КОПИЯ`, 'warn', 6000);
@@ -142,6 +142,11 @@ function updateQueueChip(n) {
 }
 
 const currentSettings = () => getSettings();
+
+// Ключ офлайн-копии. У локального вальта нет URL, поэтому копии всех вальтов
+// сваливались в одну запись: демо-вальт показывал боевые заметки, мини-вальт —
+// чужой граф. Ключ должен различать источник, а не только адрес.
+const cacheKey = s => s?.demo ? 'demo' : s?.native ? `native:${s.vaultPath || ''}` : s?.url;
 function resetConnection() {
   if (state.channel) state.channel.stop();
   clearSettings();
@@ -236,7 +241,22 @@ state.creator = initNoteCreator();
 
 stashLaunchParams();   // до всего: ярлык и «поделиться» приходят с query
 
-const s = getSettings();
-if (s) boot();
-else if (!IS_APP) { saveSettings({ demo: true }); boot(); }   // песочница предпросмотра — сразу демо
-else showConnect();
+/* ── десктоп ──────────────────────────────────────────────────────────────
+   В приложении вальт лежит на диске: если папка уже выбрана, спрашивать нечего —
+   стартуем сразу. Команды из трея и глобальный хоткей приходят сюда же. */
+if (IS_NATIVE) {
+  document.documentElement.classList.add('native');
+  window.shardsNative.onCapture(() => state.capture.open());
+  window.shardsNative.onRoute(hash => { location.hash = hash; });
+  window.shardsNative.onVaultPicked(path => { saveSettings({ native: true, vaultPath: path }); boot(); });
+
+  window.shardsNative.state().then(st => {
+    if (st.ready) { saveSettings({ native: true, vaultPath: st.path }); boot(); }
+    else showConnect();
+  });
+} else {
+  const s = getSettings();
+  if (s) boot();
+  else if (!IS_APP) { saveSettings({ demo: true }); boot(); }   // песочница предпросмотра — сразу демо
+  else showConnect();
+}

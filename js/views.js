@@ -1,5 +1,5 @@
 // Экраны: подключение, граф, заметка, картотека, поиск + быстрая мысль + тосты.
-import { tools, isConflict, getSettings, saveSettings, clearSettings, initTransport, AuthError, NetError } from './api.js';
+import { tools, isConflict, getSettings, saveSettings, clearSettings, initTransport, AuthError, NetError, IS_NATIVE } from './api.js';
 import { corpus, resolveWiki, searchCorpus } from './corpus.js';
 import { markTerms, queryTerms, parseSynonyms, parseServerSearch } from './search.js';
 import { splitFrontmatter, parseSections, renderMd, fmtBytes, fmtAge, plural } from './md.js';
@@ -34,7 +34,32 @@ export function wireWikiLinks(root) {
 }
 
 /* ── подключение ─────────────────────────────────────────── */
+
+// В приложении на своей машине вальт — это папка, а не адрес с секретом.
+// Спрашиваем ровно одно: где она лежит.
+function renderConnectNative(root, onDone) {
+  root.innerHTML = `<div class="conn-wrap"><div class="conn">
+    <div class="hd"><span class="gem"></span><b>ОСКОЛКИ</b><span>ПЕРВЫЙ ЗАПУСК</span></div>
+    <div class="bd">
+      <div style="font-size:11.5px;color:var(--mid);line-height:1.9">Приложение читает и пишет вальт прямо с диска: без интернета, без воркера и без секрета. Укажите папку с заметками — ту, где лежат <b style="color:var(--text)">daily</b> и <b style="color:var(--text)">_машина/индекс</b>.</div>
+      <div class="status" id="c-status" hidden></div>
+      <button class="go" id="c-pick">ВЫБРАТЬ ПАПКУ ВАЛЬТА</button>
+      <div class="ft"><span>синхронизация остаётся за git — приложение видит правки сразу</span><span class="demo" id="c-demo">ДЕМО БЕЗ ВАЛЬТА</span></div>
+    </div></div></div>`;
+  const st = $('#c-status', root);
+  $('#c-pick', root).addEventListener('click', async () => {
+    const path = await window.shardsNative.pick();
+    if (!path) return;
+    st.hidden = false; st.className = 'status ok';
+    st.innerHTML = `<span class="dot glow" style="background:currentColor"></span><span>ВАЛЬТ НАЙДЕН · ${path.toUpperCase()}</span>`;
+    saveSettings({ native: true });
+    setTimeout(onDone, 400);
+  });
+  $('#c-demo', root).addEventListener('click', () => { saveSettings({ demo: true }); onDone(); });
+}
+
 export function renderConnect(root, onDone) {
+  if (IS_NATIVE) return renderConnectNative(root, onDone);
   root.innerHTML = `<div class="conn-wrap"><div class="conn">
     <div class="hd"><span class="gem"></span><b>SHARDS</b><span>ПЕРВЫЙ ЗАПУСК</span></div>
     <div class="bd">

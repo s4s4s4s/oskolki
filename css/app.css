@@ -231,6 +231,16 @@ a.wiki.broken{color:var(--mid);border-bottom-style:dashed}
 .cap .ft{display:flex;gap:8px;padding:10px 14px;border-top:1px solid rgba(240,168,96,.35);align-items:center}
 .cap .ft .note{margin-left:auto;font-size:9.5px;color:var(--dim)}
 
+/* ── десктопное приложение ──
+   Своей титульной полосы нет: её роль играет верхняя полоса приложения.
+   Значит она должна таскать окно, а кнопки внутри — оставаться кликабельными,
+   и справа нужно место под системные кнопки окна. */
+html.native .strip{-webkit-app-region:drag;padding-right:148px}
+html.native .strip .tab,
+html.native .strip button,
+html.native .strip .ws,
+html.native .strip .info{-webkit-app-region:no-drag}
+
 /* ── спросить память ── */
 .ask-bar{display:flex;align-items:center;gap:8px;margin-top:12px;flex-wrap:wrap}
 .ask-answer{margin-top:16px;border:1px solid rgba(240,168,96,.45);background:rgba(240,168,96,.04);padding:16px 18px}

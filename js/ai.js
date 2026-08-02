@@ -76,6 +76,23 @@ export async function askClaude(question, ctx, { mode = 'fast', onText, signal }
   const { key } = getAiSettings();
   if (!key) throw new AiError('нет ключа Anthropic — режим «здесь» недоступен');
   const m = MODES[mode] || MODES.fast;
+  const userContent = `=== ФРАГМЕНТЫ ИЗ ПАМЯТИ ===\n\n${ctx.text}\n\n=== ВОПРОС ===\n\n${question}`;
+
+  // В десктопе запрос уходит из главного процесса: у него нет CORS, поэтому не
+  // нужны браузерные послабления, а ключ не светится в сетевом слое страницы.
+  if (typeof window !== 'undefined' && window.shardsNative?.ask) {
+    const r = await window.shardsNative.ask(key, {
+      model: MODEL, stream: true, system: SYSTEM_PROMPT,
+      messages: [{ role: 'user', content: userContent }], ...m.body,
+    }, chunk => onText && onText(chunk, null));
+    if (!r.ok) {
+      if (r.status === 401) throw new AiError('ключ Anthropic не принят (401)');
+      if (r.status === 429) throw new AiError('лимит запросов (429) — подождите минуту');
+      throw new AiError(r.text || 'запрос не прошёл');
+    }
+    if (r.stop === 'refusal') throw new AiError('модель отклонила запрос (refusal)');
+    return { text: r.text, stop: r.stop };
+  }
 
   let res;
   try {
@@ -91,13 +108,8 @@ export async function askClaude(question, ctx, { mode = 'fast', onText, signal }
         'anthropic-dangerous-direct-browser-access': 'true',
       },
       body: JSON.stringify({
-        model: MODEL,
-        stream: true,
-        system: SYSTEM_PROMPT,
-        messages: [{
-          role: 'user',
-          content: `=== ФРАГМЕНТЫ ИЗ ПАМЯТИ ===\n\n${ctx.text}\n\n=== ВОПРОС ===\n\n${question}`,
-        }],
+        model: MODEL, stream: true, system: SYSTEM_PROMPT,
+        messages: [{ role: 'user', content: userContent }],
         ...m.body,
       }),
     });

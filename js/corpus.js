@@ -163,12 +163,16 @@ export async function fetchIndex(onStep) {
   await Promise.all(Array.from({ length: 4 }, async () => {
     while (queue.length) { const f = queue.shift(); texts.push(await tools.read(f)); }
   }));
-  const meta = metaFile ? JSON.parse(await tools.read(metaFile)) : {};
+  // BOM в начале файла роняет JSON.parse и уносит с собой весь корпус.
+  // Сборщик индекса его не ставит, но файл может быть переписан чем угодно —
+  // редактором, скриптом, PowerShell, — и терять из-за этого карту глупо.
+  const json = t => JSON.parse(t.replace(/^﻿/, ''));
+  const meta = metaFile ? json(await tools.read(metaFile)) : {};
   // Словарь синонимов необязателен: без него локальный поиск просто не сводит
   // разные корни («лечу» и «переезд»), всё остальное работает.
   const synonyms = await tools.read(SYNONYMS_PATH).catch(() => '');
 
-  const chunks = texts.flatMap(t => JSON.parse(t));
+  const chunks = texts.flatMap(json);
   return { chunks, meta, synonyms, at: new Date().toISOString() };
 }
 

@@ -1,0 +1,59 @@
+{
+  "name": "oskolki",
+  "productName": "Осколки",
+  "version": "1.0.0",
+  "description": "Карта личной памяти: граф связей, поиск, запись в вальт и разговор с ИИ по своим заметкам",
+  "author": "Alexander <s4s4spol@gmail.com>",
+  "license": "UNLICENSED",
+  "private": true,
+  "type": "module",
+  "main": "desktop/main.mjs",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win",
+    "pack": "electron-builder --win --dir"
+  },
+  "devDependencies": {
+    "electron": "^34.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "dev.oskolki.app",
+    "productName": "Осколки",
+    "directories": {
+      "output": "dist",
+      "buildResources": "desktop/build"
+    },
+    "files": [
+      "index.html",
+      "manifest.webmanifest",
+      "css/**/*",
+      "js/**/*",
+      "fonts/**/*",
+      "icons/**/*",
+      "desktop/**/*",
+      "!desktop/build/**/*",
+      "!_dev/**/*",
+      "!dist/**/*"
+    ],
+    "win": {
+      "target": [
+        { "target": "nsis", "arch": ["x64"] },
+        { "target": "portable", "arch": ["x64"] }
+      ],
+      "icon": "desktop/build/icon.ico",
+      "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Осколки"
+    },
+    "portable": {
+      "artifactName": "Осколки-портативная-${version}.exe"
+    }
+  }
+}

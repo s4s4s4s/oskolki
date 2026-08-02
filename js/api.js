@@ -44,9 +44,27 @@ function realTransport(url, secret) {
   };
 }
 
+/* Десктоп: вальт лежит на диске, и ходить за ним в сеть незачем. Тот же набор
+   инструментов, но через мост в главный процесс — без секрета, без интернета,
+   с мгновенным чтением. Всё остальное приложение об этом не знает: контракт
+   транспорта один. */
+export const IS_NATIVE = typeof window !== 'undefined' && !!window.shardsNative;
+
+const nativeTransport = {
+  demo: false,
+  native: true,
+  async ping() { const s = await window.shardsNative.state(); if (!s.ready) throw new AuthError('вальт не выбран'); return {}; },
+  async call(name, args) {
+    const r = await window.shardsNative.call(name, args);
+    return { content: [{ text: r.text }], isError: r.isError };
+  },
+};
+
 export let transport = null;
 export function initTransport(settings) {
-  transport = settings?.demo ? demoTransport : realTransport(settings.url, settings.secret);
+  transport = settings?.demo ? demoTransport
+    : settings?.native ? nativeTransport
+    : realTransport(settings.url, settings.secret);
   return transport;
 }
 
@@ -71,6 +89,21 @@ export const isConflict = e => e instanceof ToolError && /конфликт/i.tes
 // POST {url без /mcp}/ticket → {ts,t}; wss://{хост}/ws?ts&t; билет живёт 2 мин.
 export function liveChannel(settings) {
   if (settings?.demo) return demoChannel();
+  // На десктопе живой канал — это слежение за файлами вальта: git pull, правка
+  // в Obsidian или запись из чата видны сразу, без вебхука и WebSocket.
+  if (settings?.native) {
+    const ch = { onEvent: null, onStatus: null };
+    ch.start = () => {
+      window.shardsNative.onChanged(ev => ch.onEvent && ch.onEvent({
+        type: 'push', sha: 'local', message: `изменено файлов: ${ev.paths.length}`,
+        paths: ev.paths, indexTouched: ev.indexTouched,
+      }));
+      ch.onStatus && ch.onStatus('live');
+    };
+    ch.stop = () => {};
+    ch.kick = () => {};
+    return ch;
+  }
   const base = settings.url.replace(/\/mcp\/?$/, '');
   const { host, protocol } = new URL(base);
   // ws:// для локального стенда, wss:// для боевого воркера — иначе на localhost
