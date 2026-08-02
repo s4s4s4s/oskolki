@@ -12,6 +12,7 @@ import {
   SPLIT_MIN, SUBZONE_MIN, CHRONICLE_ZONES, CHRONICLE_COLOR, HIDDEN_LAYERS, HIDDEN_ZONES,
 } from './config.js';
 import { prepareChunks, parseSynonyms, searchChunks } from './search.js';
+import { searchVectors, fuseRRF, getEmbedSettings, vecState } from './vectors.js';
 
 export const corpus = {
   notes: [],           // {path, base, title, zone, zoneRef, type, status, tags, meta, out, in, links, backlinks, deg}
@@ -280,7 +281,32 @@ let searchIndex = null;
 
 // Возвращает {results:[{path,title,frag,rank,coverage}], terms}. На карте это
 // чтение нескольких шардов словаря, на старой схеме — перебор кусков в памяти.
-export async function searchCorpus(query, limit = 25) {
+export async function searchCorpus(query, limit = 25, { hybrid = true } = {}) {
+  const base = await bm25(query, limit);
+  if (!hybrid || !getEmbedSettings().on) return base;
+
+  /* Смысловой слой — необязательное слагаемое. Если векторов нет, эндпоинт не
+     отвечает или модель разошлась со сборкой, поиск просто остаётся словесным:
+     ронять из-за этого выдачу нельзя, а объяснять человеку устройство слоёв на
+     каждом запросе — тем более. Ошибка запоминается в vecState и видна в
+     настройках, где ей и место. */
+  try {
+    const vec = await searchVectors(query, limit);
+    if (!vec.length) return base;
+    const enriched = vec.map(v => {
+      const n = corpus.byPath.get(v.path);
+      return { path: v.path, title: n?.title || v.path, chain: v.heading || '', rank: v.score, vector: true };
+    });
+    const results = fuseRRF([base.results, enriched], { limit })
+      .map(r => ({ ...r, title: r.title || corpus.byPath.get(r.path)?.title || r.path }));
+    return { results, terms: base.terms, hybrid: true };
+  } catch (e) {
+    vecState.error = e.message;
+    return base;
+  }
+}
+
+async function bm25(query, limit) {
   if (corpus.fromMap) {
     const { results, terms } = await searchMap(query, limit);
     return { results, terms };

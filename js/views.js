@@ -12,6 +12,7 @@ import { LINK_TYPES, TYPE_OF_FIELD, FIELD_OF_TYPE } from './frontmatter.js';
 import { parseQuery, filterNotes, matches, hasFilters, describe, FIELDS } from './query.js';
 import { diffLines, collapseSame } from './diff.js';
 import { similarTo, buildClusters } from './similar.js';
+import { initVectors, embedQuery, getEmbedSettings, saveEmbedSettings, vecState } from './vectors.js';
 
 export const $ = (sel, el = document) => el.querySelector(sel);
 export const el = (tag, cls, html) => { const d = document.createElement(tag); if (cls) d.className = cls; if (html != null) d.innerHTML = html; return d; };
@@ -834,6 +835,56 @@ export function renderCards(root, tag) {
   drawZones(); draw();
 }
 
+/* Настройки смыслового слоя. Он выключен по умолчанию и включается только
+   осознанно: для работы нужны и собранные векторы в вальте, и эндпоинт, который
+   посчитает вектор запроса. Здесь же видно, чего не хватает, — иначе включённый
+   тумблер без векторов выглядел бы как поломка поиска. */
+async function embedSettings(onDone) {
+  const wrap = $('#modal');
+  const s = getEmbedSettings();
+  const ready = await initVectors().catch(() => false);
+  const m = vecState.manifest;
+  wrap.innerHTML = `<div class="cap" style="width:640px"><div class="hd">СМЫСЛОВОЙ ПОИСК<span>ESC — ЗАКРЫТЬ</span></div>
+    <div class="hint-row">поиск по словам находит названное своим именем; смысловой — то, что вспоминается описанием. Работают вместе: результат тем выше, чем выше он в обоих списках.</div>
+    <div class="row"><label style="flex:1"><span class="lbl">ЭНДПОИНТ ЭМБЕДДИНГОВ</span>
+      <input id="ev-url" value="${escA(s.url)}" spellcheck="false"></label></div>
+    <div class="row" style="padding-top:0"><label style="flex:1"><span class="lbl">МОДЕЛЬ</span>
+      <input id="ev-model" value="${escA(s.model)}" spellcheck="false"></label></div>
+    <div class="search-stats" style="padding:0 14px">${ready
+      ? `<span style="color:var(--green)">векторы в вальте: ${m.count} ${plural(m.count, 'кусок', 'куска', 'кусков')}, ${m.dim} измерений, модель ${escA(m.model)}, собраны ${String(m.built).slice(0, 10)}</span>`
+      : `<span style="color:var(--amber-l)">векторов в вальте нет${vecState.error ? ` (${escA(vecState.error)})` : ''} — соберите: node build-vectors.mjs</span>`}</div>
+    <div class="ft">
+      <button class="btn-amber" style="margin:0" id="ev-on" ${ready ? '' : 'disabled'}>${s.on ? 'ВЫКЛЮЧИТЬ' : 'ВКЛЮЧИТЬ'}</button>
+      <button class="btn-line" id="ev-test">ПРОВЕРИТЬ ЭНДПОИНТ</button>
+      <button class="btn-line" id="ev-close">ЗАКРЫТЬ</button>
+      <span class="note">адрес и модель хранятся только на этом устройстве</span></div></div>`;
+  const close = () => { wrap.classList.remove('open'); document.activeElement?.blur(); onDone?.(); };
+  const grab = () => saveEmbedSettings({ url: $('#ev-url', wrap).value.trim(), model: $('#ev-model', wrap).value.trim() });
+  $('#ev-close', wrap).addEventListener('click', close);
+  $('#ev-on', wrap).addEventListener('click', () => {
+    grab();
+    const now = !getEmbedSettings().on;
+    saveEmbedSettings({ on: now });
+    toast(now ? 'СМЫСЛОВОЙ СЛОЙ ВКЛЮЧЁН' : 'СМЫСЛОВОЙ СЛОЙ ВЫКЛЮЧЕН');
+    close();
+  });
+  $('#ev-test', wrap).addEventListener('click', async () => {
+    grab();
+    const btn = $('#ev-test', wrap); btn.textContent = 'ПРОВЕРЯЮ…';
+    try {
+      const was = getEmbedSettings().on;
+      saveEmbedSettings({ on: true });
+      const v = await embedQuery('проверка связи');
+      saveEmbedSettings({ on: was });
+      toast(`ЭНДПОИНТ ОТВЕТИЛ: ${v.length} ИЗМЕРЕНИЙ${m && v.length !== m.dim ? ` · НО В ВАЛЬТЕ ${m.dim} — МОДЕЛИ РАЗНЫЕ` : ''}`, m && v.length !== m.dim ? 'warn' : '', 6000);
+    } catch (e) { toast(`НЕ ОТВЕТИЛ: ${e.message}`, 'err', 6000); }
+    btn.textContent = 'ПРОВЕРИТЬ ЭНДПОИНТ';
+  });
+  wrap.classList.add('open');
+  wrap.addEventListener('keydown', e => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  wrap.addEventListener('click', e => { if (e.target === wrap) close(); });
+}
+
 /* ── ИИ-помощники ────────────────────────────────────────────────────────────
    Общая обвязка для всех помощников. Она устроена так, что ключ Anthropic —
    удобство, а не условие: с ключом запрос уходит прямо отсюда и ответ печатается
@@ -1130,12 +1181,17 @@ export function renderSearch(root, q) {
       <span class="seg" style="display:flex;gap:0">
         <button class="chip" data-m="local" title="по корпусу в браузере — мгновенно и офлайн">ПАМЯТЬ</button>
         <button class="chip" data-m="server" title="vault_search на воркере — видит свежие правки">СЕРВЕР</button>
-      </span></div>
+      </span>
+      <button class="chip" id="s-vec" title="смысловой слой: находит по описанию, когда слово забыто">✦ СМЫСЛ</button></div>
     <div class="search-stats" id="s-stats"></div>
     <div id="s-results"></div>
     <div class="srv-hint" id="s-hint" hidden></div></div></div>`;
   const input = $('#s-q', root), resBox = $('#s-results', root), stats = $('#s-stats', root), hint = $('#s-hint', root);
-  const markMode = () => root.querySelectorAll('[data-m]').forEach(b => b.classList.toggle('on', b.dataset.m === searchState.mode));
+  const markMode = () => {
+    root.querySelectorAll('[data-m]').forEach(b => b.classList.toggle('on', b.dataset.m === searchState.mode));
+    $('#s-vec', root).classList.toggle('on', getEmbedSettings().on);
+  };
+  $('#s-vec', root).addEventListener('click', () => embedSettings(markMode));
   input.focus();
 
   const rowsHtml = rows => rows.map(r => {
