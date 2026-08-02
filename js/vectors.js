@@ -50,22 +50,16 @@ export async function initVectors() {
   return vecState.ready;
 }
 
-// Шард — сырые байты int8. Через vault_read они приходят строкой, поэтому файл
-// читается как base64 только если транспорт умеет бинарь; иначе — обычный fetch
-// по сырому URL, который в вебе отдаёт GitHub Pages, а в приложении — файловая
-// система. Это единственное место, где слою нужен байтовый доступ.
+/* Шард — int8-векторы, упакованные в base64 внутри обычного json. Так они
+   читаются тем же каналом, что и заметки: в вебе воркер отдаёт только текст, и
+   сырые байты по нему не проходят. Треть лишнего объёма — плата за то, что
+   бинарного контура нет вообще ни в вебе, ни в приложении, ни на стенде. */
 async function shard(i) {
   if (vecState.shards[i]) return vecState.shards[i];
-  const url = `${DIR}/${String(i).padStart(3, '0')}.bin`;
-  let buf;
-  if (typeof window !== 'undefined' && window.shardsNative?.readBinary) {
-    buf = await window.shardsNative.readBinary(url);
-  } else {
-    const r = await fetch(`./${url}`);
-    if (!r.ok) throw new Error(`шард ${i} не прочитан (${r.status})`);
-    buf = await r.arrayBuffer();
-  }
-  const arr = new Int8Array(buf);
+  const { b64 } = await readJson(`${DIR}/${String(i).padStart(3, '0')}.json`);
+  const bin = atob(b64);
+  const arr = new Int8Array(bin.length);
+  for (let k = 0; k < bin.length; k++) arr[k] = (bin.charCodeAt(k) << 24) >> 24;   // байт → знаковый int8
   vecState.shards[i] = arr;
   vecState.loaded += arr.length;
   return arr;

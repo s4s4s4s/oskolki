@@ -41,14 +41,26 @@ function vector(text) {
   return [...v].map(x => x / n);
 }
 
+// Запрос с `content-type: application/json` браузер шлёт не сразу: сперва идёт
+// OPTIONS-предпроверка, и без ответа на неё fetch падает с невнятным «Failed to
+// fetch». Настоящая ollama ведёт себя так же, пока ей не разрешить источник
+// переменной OLLAMA_ORIGINS, — поэтому заглушка обязана вести себя честно.
+const CORS = {
+  'access-control-allow-origin': '*',
+  'access-control-allow-methods': 'POST, OPTIONS',
+  'access-control-allow-headers': 'content-type, authorization',
+  'access-control-max-age': '86400',
+};
+
 createServer((req, res) => {
+  if (req.method === 'OPTIONS') { res.writeHead(204, CORS); res.end(); return; }
   let body = '';
   req.on('data', c => (body += c));
   req.on('end', () => {
     let j = {};
     try { j = JSON.parse(body || '{}'); } catch {}
     const text = j.prompt ?? j.input ?? '';
-    res.writeHead(200, { 'content-type': 'application/json', 'access-control-allow-origin': '*' });
+    res.writeHead(200, { 'content-type': 'application/json', ...CORS });
     res.end(JSON.stringify({ embedding: vector(text), model: j.model || 'fake' }));
   });
 }).listen(PORT, () => console.log(`[заглушка] эмбеддинги на http://localhost:${PORT}/api/embeddings — только для проверки тракта`));
