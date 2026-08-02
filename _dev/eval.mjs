@@ -84,7 +84,10 @@ function loadVectors(dir) {
   const chunks = JSON.parse(readFileSync(join(dir, 'куски.json'), 'utf8'));
   const shards = [];
   for (let s = 0; s < manifest.shards; s++) {
-    const buf = readFileSync(join(dir, `${String(s).padStart(3, '0')}.bin`));
+    // Шард — int8 в base64 внутри json: тот же файл читают и приложение, и воркер,
+    // который умеет отдавать только текст.
+    const { b64 } = JSON.parse(readFileSync(join(dir, `${String(s).padStart(3, '0')}.json`), 'utf8'));
+    const buf = Buffer.from(b64, 'base64');
     shards.push(new Int8Array(buf.buffer, buf.byteOffset, buf.length));
   }
   return { manifest, chunks, shards };
