@@ -1,7 +1,7 @@
 /* Оболочка кэшируется, данные — никогда: они ходят к воркеру на другой origin
    и этот service worker их не трогает. Стратегия network-first: новый деплой
    подхватывается обычной перезагрузкой, офлайн отдаёт последнюю версию. */
-const CACHE = "oskolki-v1";
+const CACHE = "oskolki-v2";
 const SHELL = ["./", "./index.html", "./manifest.webmanifest", "./icon.svg"];
 
 self.addEventListener("install", (e) => {

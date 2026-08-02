@@ -176,7 +176,7 @@
   <div><div class="lbl">Раскладка</div>
     <div class="seg" id="segMode"><button data-v="orbit" class="on">Орбита</button><button data-v="force">Сила</button><button data-v="rings">Кольца</button></div></div>
   <div><div class="lbl">Цвет</div>
-    <div class="seg" id="segColor"><button data-v="fresh" class="on">Свежесть</button><button data-v="zone">Зона</button><button data-v="deg">Связность</button></div></div>
+    <div class="seg" id="segColor"><button data-v="zone" class="on">Зона</button><button data-v="fresh">Свежесть</button><button data-v="deg">Связность</button></div></div>
   <div><div class="lbl">Размер</div>
     <div class="seg" id="segSize"><button data-v="bytes" class="on">Объём</button><button data-v="deg">Связи</button><button data-v="commits">Правки</button></div></div>
   <div><div class="lbl">Зоны</div><div class="chip-row" id="zones"></div></div>
@@ -474,15 +474,19 @@ $("#sGo").addEventListener("click", async () => {
   b.disabled = false;
 });
 
-/* ── графовый движок (общий с прототипом) ── */
-const state = { view: "3d", mode: "orbit", colorBy: "fresh", sizeBy: "bytes",
+/* ── графовый движок ── */
+const REDUCED = matchMedia("(prefers-reduced-motion: reduce)").matches;
+const state = { view: "3d", mode: "orbit", colorBy: "zone", sizeBy: "bytes",
   zoneOn: new Set(), q: "", edges: true, labels: true,
-  spin: !matchMedia("(prefers-reduced-motion: reduce)").matches,
-  hover: -1, sel: -1, rotY: .4, rotX: -.18, zoom: 1, tween: 1 };
+  spin: !REDUCED,
+  hover: -1, sel: -1, rotY: .4, rotX: -.18, zoom: 1, tween: 1,
+  intro: REDUCED ? 1 : 0 };
 const flat = () => state.view === "2d" || state.mode !== "orbit";
 
 let css = {};
-const ZHUES = [222, 158, 38, 268, 340, 100, 190, 62, 300, 16, 240, 130, 285, 350];
+// Подобранные вручную оттенки созвездий: соседние по кругу зоны различимы,
+// грязных пар нет. Светлота и насыщенность зависят от темы.
+const ZHUES = [250, 160, 85, 20, 300, 200, 350, 125, 60, 272, 182, 38, 322, 220];
 function readCss() {
   const s = getComputedStyle(document.documentElement);
   for (const k of ["void", "text", "dim", "faint", "accent", "fresh", "aging", "stale", "cold", "halo"])
@@ -491,7 +495,7 @@ function readCss() {
   if (W) resize();
 }
 const darkNow = () => css.halo === "lighter";
-const zoneColor = (z) => `oklch(${darkNow() ? "74%" : "48%"} 0.13 ${ZHUES[zonesAll.indexOf(z) % ZHUES.length] || 222})`;
+const zoneColor = (z) => `oklch(${darkNow() ? "76%" : "46%"} ${darkNow() ? "0.155" : "0.125"} ${ZHUES[zonesAll.indexOf(z) % ZHUES.length] || 250})`;
 const freshColor = (a) => a == null ? css.cold : a <= 7 ? css.fresh : a <= 14 ? css.aging : a <= 21 ? css.stale : css.cold;
 const maxDeg = () => Math.max(1, ...nodes.map((n) => n.deg));
 const nodeColor = (n) => state.colorBy === "zone" ? zoneColor(n.zone)
@@ -510,11 +514,11 @@ function fib(i, n) {
   return [Math.cos(th) * Math.sin(phi), Math.sin(th) * Math.sin(phi), Math.cos(phi)];
 }
 function layoutOrbit() {
-  const R = 235;
+  const R = 265; // созвездия дальше друг от друга — меньше перехлёста рёбер между ними
   zonesAll.forEach((z, zi) => {
     const [cx, cy, cz] = fib(zi, zonesAll.length);
     const ms = nodes.filter((n) => n.zone === z);
-    const cr = 16 + 30 * Math.cbrt(ms.length);
+    const cr = 14 + 26 * Math.cbrt(ms.length);
     ms.forEach((n) => {
       const rnd = mulberry(n.id * 7919 + 13);
       const u = rnd() * 2 - 1, th = rnd() * Math.PI * 2, rr = cr * Math.cbrt(rnd());
@@ -561,21 +565,23 @@ function forceStep() {
   for (let i = 0; i < nodes.length; i++) {
     const a = nodes[i];
     if (!visible(a)) continue;
-    let fx = -a.tx * .012, fy = -a.ty * .012;
+    let fx = -a.tx * .009, fy = -a.ty * .009;
     for (let j = 0; j < nodes.length; j++) {
       if (i === j) continue;
       const b = nodes[j];
       if (!visible(b)) continue;
       const dx = a.tx - b.tx, dy = a.ty - b.ty, d2 = dx * dx + dy * dy + 40;
-      fx += dx * 69 / d2; fy += dy * 69 / d2;
+      fx += dx * 96 / d2; fy += dy * 96 / d2;
     }
-    a.vx = (a.vx + fx) * .82; a.vy = (a.vy + fy) * .82;
+    a.vx = (a.vx + fx) * .84; a.vy = (a.vy + fy) * .84;
   }
   for (const [ai, bi] of edges) {
     const a = nodes[ai], b = nodes[bi];
     if (!visible(a) || !visible(b)) continue;
     const dx = b.tx - a.tx, dy = b.ty - a.ty, d = Math.hypot(dx, dy) || 1;
-    const f = (d - 46) * .016;
+    // Длина пружины растёт со связностью концов: хабы не стягивают всё в ком.
+    const rest = 52 + 3.5 * Math.min(10, nodes[ai].deg + nodes[bi].deg);
+    const f = (d - rest) * .014;
     a.vx += dx / d * f; a.vy += dy / d * f; b.vx -= dx / d * f; b.vy -= dy / d * f;
   }
   for (const n of nodes) { n.tx += n.vx; n.ty += n.vy; }
@@ -615,19 +621,46 @@ function project(n) {
   const p = PD / (PD - dz * .9);
   return { sx: W / 2 + dx * p * state.zoom, sy: H / 2 + dy * p * state.zoom, p, dz };
 }
-const stars = Array.from({ length: 130 }, (_, i) => {
+const stars = Array.from({ length: 340 }, (_, i) => {
   const r = mulberry(i * 31 + 5);
-  return { a: r() * Math.PI * 2, r: .25 + r() * .75, s: .4 + r() * 1.1, o: .12 + r() * .3 };
+  return { a: r() * Math.PI * 2, r: .2 + r() * .85, s: .4 + r() * 1.4,
+           o: .1 + r() * .38, tw: .4 + r() * 1.8, ph: r() * 6.28 };
 });
+// Туманности: три гигантских мягких пятна в цветах ближайших созвездий —
+// дают глубину фону вместо плоской черноты.
+const NEBULAE = [
+  { x: .28, y: .30, r: .52, hue: 250, ph: 0 },
+  { x: .74, y: .62, r: .48, hue: 300, ph: 2.1 },
+  { x: .55, y: .18, r: .40, hue: 182, ph: 4.2 },
+];
+// Цвет с альфой для hex и oklch — обе записи живут в палитре.
+function withAlpha(c, a) {
+  if (c.startsWith("#")) {
+    const n = parseInt(c.slice(1), 16);
+    return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
+  }
+  return c.replace(/\)\s*$/, ` / ${a})`);
+}
 const spriteCache = new Map();
+// Двухслойное свечение: белое горячее ядро → цвет → долгое затухание.
+// Один спрайт на цвет, дальше только drawImage — дёшево.
 function halo(color) {
   let s = spriteCache.get(color);
   if (s) return s;
-  s = document.createElement("canvas"); s.width = s.height = 64;
+  s = document.createElement("canvas"); s.width = s.height = 96;
   const g = s.getContext("2d");
-  const grad = g.createRadialGradient(32, 32, 2, 32, 32, 30);
-  grad.addColorStop(0, color); grad.addColorStop(1, "transparent");
-  g.fillStyle = grad; g.fillRect(0, 0, 64, 64);
+  const grad = g.createRadialGradient(48, 48, 1, 48, 48, 46);
+  if (darkNow()) {
+    grad.addColorStop(0, "rgba(255,255,255,.95)");
+    grad.addColorStop(.14, color);
+    grad.addColorStop(.45, withAlpha(color, .35));
+    grad.addColorStop(1, "transparent");
+  } else {
+    grad.addColorStop(0, color);
+    grad.addColorStop(.5, withAlpha(color, .25));
+    grad.addColorStop(1, "transparent");
+  }
+  g.fillStyle = grad; g.fillRect(0, 0, 96, 96);
   spriteCache.set(color, s);
   return s;
 }
@@ -636,18 +669,39 @@ let tPrev = performance.now();
 function frame(t) {
   const dt = Math.min((t - tPrev) / 16.7, 3);
   tPrev = t;
-  if (state.spin && !flat() && !drag.on) state.rotY += .0016 * dt;
+  if (state.spin && !flat() && !drag.on) state.rotY += .0013 * dt;
   if (state.mode === "force" && state.tween >= 1) forceStep();
   if (state.tween < 1) state.tween = Math.min(1, state.tween + .035 * dt);
+  if (state.intro < 1) state.intro = Math.min(1, state.intro + .014 * dt);
   const e = 1 - Math.pow(1 - state.tween, 3);
   for (const n of nodes) {
-    n.x = n.fx + (n.tx - n.fx) * e; n.y = n.fy + (n.ty - n.fy) * e; n.z = n.fz + (n.tz - n.fz) * e;
+    // Вступление: осколки разлетаются из центра волной, каждый со своей задержкой.
+    const fi = Math.max(0, Math.min(1, state.intro * 1.7 - (n.id / Math.max(1, nodes.length)) * .7));
+    const ei = 1 - Math.pow(1 - fi, 3);
+    n.x = (n.fx + (n.tx - n.fx) * e) * ei;
+    n.y = (n.fy + (n.ty - n.fy) * e) * ei;
+    n.z = (n.fz + (n.tz - n.fz) * e) * ei;
   }
   x2.clearRect(0, 0, W, H);
+
+  // Туманности — глубина вместо плоской черноты. Медленно дышат вместе с орбитой.
+  for (const nb of NEBULAE) {
+    const drift = Math.sin(state.rotY * .5 + nb.ph) * .015;
+    const nx = (nb.x + drift) * W, ny = nb.y * H, nr = nb.r * Math.max(W, H);
+    const g = x2.createRadialGradient(nx, ny, 0, nx, ny, nr);
+    const l = darkNow() ? "34%" : "88%";
+    g.addColorStop(0, `oklch(${l} 0.055 ${nb.hue} / ${darkNow() ? .10 : .35})`);
+    g.addColorStop(1, "transparent");
+    x2.fillStyle = g;
+    x2.fillRect(nx - nr, ny - nr, nr * 2, nr * 2);
+  }
+
+  // Звёздная пыль с мерцанием.
   x2.fillStyle = css.faint;
   for (const s of stars) {
     const a = s.a + state.rotY * .25;
-    x2.globalAlpha = s.o * (darkNow() ? 1 : .5);
+    const tw = REDUCED ? 1 : .68 + .32 * Math.sin(t * .001 * s.tw + s.ph);
+    x2.globalAlpha = s.o * tw * (darkNow() ? 1 : .45);
     x2.fillRect(W / 2 + Math.cos(a) * s.r * W * .62, H / 2 + Math.sin(a) * s.r * H * .62, s.s, s.s);
   }
   x2.globalAlpha = 1;
@@ -656,20 +710,59 @@ function frame(t) {
   const focus = state.sel !== -1 ? state.sel : state.hover;
   const nbSet = focus !== -1 && neighbors.has(focus) ? new Set([focus, ...neighbors.get(focus)]) : null;
 
-  if (state.edges) {
-    x2.lineWidth = 1;
+  // Направляющие кольца свежести — только в режиме колец, с подписями сроков.
+  if (state.mode === "rings" && state.tween > .5) {
+    x2.textBaseline = "middle";
+    x2.font = "10px " + getComputedStyle(document.body).fontFamily;
+    const RINGS = [[105, "неделя"], [185, "две недели"], [260, "три"], [330, "старше"]];
+    for (const [r, name] of RINGS) {
+      x2.globalAlpha = .12;
+      x2.strokeStyle = css.dim;
+      x2.lineWidth = 1;
+      x2.beginPath(); x2.ellipse(W / 2, H / 2, r * state.zoom, r * state.zoom, 0, 0, 7); x2.stroke();
+      x2.globalAlpha = .45;
+      x2.fillStyle = css.faint;
+      x2.fillText(name, W / 2 + r * state.zoom * .7071 + 8, H / 2 + r * state.zoom * .7071 + 8);
+    }
+    x2.globalAlpha = 1;
+  }
+
+  /* Рёбра — кривые с градиентом от цвета одного конца к цвету другого.
+     Изгиб к центру экрана собирает пучки в общее течение вместо сетки-путанки.
+     Базовая прозрачность падает с плотностью графа: сто рёбер читаются при .14,
+     пятьсот — только при .07. */
+  if (state.edges && state.intro > .35) {
+    const density = 1 / Math.sqrt(Math.max(1, edges.length / 160));
+    const base = (darkNow() ? .13 : .2) * density;
+    x2.lineWidth = darkNow() ? 1.1 : 1;
     for (const [ai, bi] of edges) {
       if (!visible(nodes[ai]) || !visible(nodes[bi])) continue;
       const pa = proj[ai], pb = proj[bi];
       const hot = nbSet && (ai === focus || bi === focus);
       const depth = Math.max(0, Math.min(1, (pa.p + pb.p) / 2 - .45));
-      x2.globalAlpha = (hot ? .55 : nbSet ? .05 : .16) * depth;
-      x2.strokeStyle = hot ? css.accent : css.dim;
-      x2.beginPath(); x2.moveTo(pa.sx, pa.sy); x2.lineTo(pb.sx, pb.sy); x2.stroke();
+      const al = (hot ? .6 : nbSet ? base * .22 : base) * depth * state.intro;
+      if (al < .008) continue;
+      const mx = (pa.sx + pb.sx) / 2, my = (pa.sy + pb.sy) / 2;
+      const cx = mx + (W / 2 - mx) * .10, cy2 = my + (H / 2 - my) * .10;
+      let stroke;
+      if (hot) stroke = css.accent;
+      else {
+        const g = x2.createLinearGradient(pa.sx, pa.sy, pb.sx, pb.sy);
+        g.addColorStop(0, nodeColor(nodes[ai]));
+        g.addColorStop(1, nodeColor(nodes[bi]));
+        stroke = g;
+      }
+      x2.globalAlpha = al;
+      x2.strokeStyle = stroke;
+      x2.beginPath();
+      x2.moveTo(pa.sx, pa.sy);
+      x2.quadraticCurveTo(cx, cy2, pb.sx, pb.sy);
+      x2.stroke();
     }
     x2.globalAlpha = 1;
   }
 
+  // Осколки: свечение (additive в темноте) + ядро + белая искра.
   const order = nodes.map((_, i) => i).sort((a, b) => proj[a].dz - proj[b].dz);
   for (const i of order) {
     const n = nodes[i];
@@ -678,32 +771,62 @@ function frame(t) {
     const r = nodeR(n) * pr.p * state.zoom;
     const col = nodeColor(n);
     const dimmed = nbSet && !nbSet.has(i);
-    const al = dimmed ? .08 : Math.max(.25, Math.min(1, pr.p - .3));
-    x2.globalAlpha = al * (darkNow() ? .8 : .45);
+    const depth = .3 + .7 * Math.max(0, Math.min(1, (pr.p - .55) * 1.6));
+    const al = dimmed ? .07 : depth;
+    x2.globalAlpha = al * (darkNow() ? .9 : .5);
     x2.globalCompositeOperation = darkNow() ? "lighter" : "source-over";
-    const hs = r * 7;
+    const hs = r * (darkNow() ? 9 : 7);
     x2.drawImage(halo(col), pr.sx - hs / 2, pr.sy - hs / 2, hs, hs);
     x2.globalCompositeOperation = "source-over";
     x2.globalAlpha = al;
     x2.fillStyle = col;
     x2.beginPath(); x2.arc(pr.sx, pr.sy, r, 0, 7); x2.fill();
+    if (darkNow() && r > 2.2 && !dimmed) {
+      x2.globalAlpha = al * .85;
+      x2.fillStyle = "#fff";
+      x2.beginPath(); x2.arc(pr.sx - r * .18, pr.sy - r * .18, r * .34, 0, 7); x2.fill();
+    }
     if (i === state.sel || i === state.hover) {
+      x2.globalAlpha = 1;
       x2.strokeStyle = css.text; x2.lineWidth = 1.4;
-      x2.beginPath(); x2.arc(pr.sx, pr.sy, r + 3, 0, 7); x2.stroke();
+      x2.beginPath(); x2.arc(pr.sx, pr.sy, r + 3.5, 0, 7); x2.stroke();
     }
   }
   x2.globalAlpha = 1;
 
+  // Имена созвездий — курсивом с засечками у центроида каждой зоны.
+  if (state.labels && state.intro > .6 && !nbSet) {
+    x2.textAlign = "center"; x2.textBaseline = "middle";
+    x2.font = "italic 15px Georgia, serif";
+    for (const z of zonesAll) {
+      if (!state.zoneOn.has(z)) continue;
+      let sx = 0, sy = 0, m = 0;
+      for (let i = 0; i < nodes.length; i++) {
+        if (nodes[i].zone !== z || !visible(nodes[i])) continue;
+        sx += proj[i].sx; sy += proj[i].sy; m++;
+      }
+      if (m < 3) continue;
+      x2.globalAlpha = .5;
+      x2.lineWidth = 4; x2.lineJoin = "round"; x2.strokeStyle = css.void;
+      x2.strokeText(z, sx / m, sy / m);
+      x2.fillStyle = css.dim;
+      x2.fillText(z, sx / m, sy / m);
+    }
+    x2.globalAlpha = 1;
+    x2.textAlign = "left";
+  }
+
+  // Подписи осколков.
   if (state.labels) {
     x2.font = "11px " + getComputedStyle(document.body).fontFamily;
     x2.textBaseline = "middle"; x2.lineWidth = 3; x2.lineJoin = "round"; x2.strokeStyle = css.void;
-    const labeled = order.filter((i) => visible(nodes[i]) && (nodeR(nodes[i]) > 5.4 || i === state.sel || (nbSet && nbSet.has(i))));
+    const labeled = order.filter((i) => visible(nodes[i]) && (nodeR(nodes[i]) > 5.6 || i === state.sel || (nbSet && nbSet.has(i))));
     for (const i of labeled.slice(-30)) {
       const pr = proj[i];
       if (nbSet && !nbSet.has(i)) continue;
       const tx = pr.sx + nodeR(nodes[i]) * pr.p * state.zoom + 6;
       const lb = nodes[i].label.slice(0, 26);
-      x2.globalAlpha = Math.max(.35, Math.min(1, pr.p - .3));
+      x2.globalAlpha = Math.max(.35, Math.min(1, pr.p - .3)) * state.intro;
       x2.strokeText(lb, tx, pr.sy);
       x2.fillStyle = css.text; x2.fillText(lb, tx, pr.sy);
     }
