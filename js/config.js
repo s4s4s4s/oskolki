@@ -1,7 +1,10 @@
 export const DEFAULT_URL = 'https://vault-mcp.vault-78edd5.workers.dev/mcp';
 export const APP_NAME = 'SHARDS';
 // приложение (github pages / localhost) против песочницы предпросмотра
-export const IS_APP = /(^|\.)github\.io$|^localhost$|^127\./.test(location.hostname);
+// Проверка на браузер: модуль импортируется и из Node — тестами и стендом, —
+// где `location` не существует и обращение к нему роняет весь импорт.
+export const IS_APP = typeof location !== 'undefined'
+  && /(^|\.)github\.io$|^localhost$|^127\./.test(location.hostname);
 // без янтарного (#f0a860) — он зарезервирован под выбор/акцент
 export const ZONE_PALETTE = ['#57d9c9', '#a48cf0', '#e07a8a', '#7fc98f', '#5ba0e0', '#e8b84b', '#d8c060', '#8a97b8'];
 export const INDEX_DIR = '_машина/индекс';
