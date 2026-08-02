@@ -137,6 +137,8 @@ export function buildFromMap(map) {
     // стареет ли объект и может ли он противоречить другому.
     klass: n.kl || '',
     kind: n.kt || '',
+    when: n.wh || '',
+    confidence: n.cf || '',
     status: n.st || '',
     tags: n.tg || [],
     headings: n.hd || [],

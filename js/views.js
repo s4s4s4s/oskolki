@@ -357,6 +357,60 @@ function drawNote(root, path, raw, note, offline) {
   drawRail(root, rail, note, sections, () => renderNote(root, path), path);
 }
 
+/* Утверждения о сущности — то, ради чего вся схема и затевалась.
+
+   У сущности («Ксюша», «pbcheck», «Ереван») сама заметка почти ничего не
+   содержит: это якорь, а не текст. Знание о ней рассыпано по осколкам, и здесь
+   оно собирается обратно — по видам и по времени, свежее сверху.
+
+   Отменённое не прячется, а показывается зачёркнутым: то, что решение
+   когда-то было другим, — тоже знание, и молча стирать его нельзя.
+
+   Для самого осколка панель показывает его паспорт: тип, дату, статус,
+   уверенность. Это те четыре вещи, по которым видно, можно ли на него
+   опираться сегодня. */
+const CLAIM_ORDER = ['решение', 'правило', 'договорённость', 'намерение', 'факт', 'наблюдение', 'событие'];
+
+function claimsPanel(note) {
+  if (!note) return '';
+
+  if (note.klass === 'утверждение' || note.klass === 'событие') {
+    const dead = note.status === 'отменено' || note.status === 'устарело';
+    return `<div class="panel"><div class="hd">ПАСПОРТ УТВЕРЖДЕНИЯ</div><div class="bd" style="padding:10px 12px;font-size:10px;color:var(--mid);line-height:2">
+      ВИД&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<b style="color:var(--text);font-weight:400">${escA((note.kind || '—').toUpperCase())}</b><br>
+      КОГДА&nbsp;&nbsp;&nbsp;<b style="color:var(--text);font-weight:400">${escA(note.when || '—')}</b><br>
+      СТАТУС&nbsp;&nbsp;<b style="color:${dead ? 'var(--red)' : 'var(--green)'};font-weight:400">${escA((note.status || '—').toUpperCase())}</b><br>
+      ОПОРА&nbsp;&nbsp;&nbsp;<b style="color:var(--text);font-weight:400">${escA((note.confidence || '—').toUpperCase())}</b>
+    </div></div>`;
+  }
+
+  const claims = (note.backlinks || []).filter(l => l.type === 'about').map(l => l.from);
+  if (!claims.length) return '';
+  const byKind = new Map();
+  for (const c of claims) {
+    const k = c.kind || 'прочее';
+    if (!byKind.has(k)) byKind.set(k, []);
+    byKind.get(k).push(c);
+  }
+  const order = [...byKind.keys()].sort((a, b) => {
+    const ia = CLAIM_ORDER.indexOf(a), ib = CLAIM_ORDER.indexOf(b);
+    return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
+  });
+  return `<div class="panel"><div class="hd">УТВЕРЖДЕНИЯ · ${claims.length}</div>
+    ${order.map(kind => {
+      const list = byKind.get(kind).sort((a, b) => String(b.when || '').localeCompare(String(a.when || '')));
+      return `<div class="rail-group"><span class="lbl">${escA(kind.toUpperCase())}</span><div class="rail-rows">${
+        list.map(c => {
+          const dead = c.status === 'отменено' || c.status === 'устарело';
+          // Дата уже стоит справа отдельной колонкой — в имени она лишняя.
+          const nm = c.title.replace(/^\d{4}-\d{2}-\d{2}\s+/, '');
+          return `<div data-p="${escA(c.path)}" title="${escA(c.status || '')}">${zoneDot(c.zoneRef)}
+            <span class="nm" style="${dead ? 'text-decoration:line-through;opacity:.55' : ''}">${nm}</span>
+            <span class="zn">${escA(String(c.when || '').slice(0, 10))}</span></div>`;
+        }).join('')}</div></div>`;
+    }).join('')}</div>`;
+}
+
 /* Правая рельса: свойства, связи по типам, обратные связи, оглавление.
 
    Раньше здесь были только метаданные и плоский список «на это ссылаются». На
@@ -407,6 +461,8 @@ function drawRail(root, rail, note, sections, reload, path) {
 
     ${note?.broken?.length ? `<div class="panel"><div class="hd" style="color:var(--red)">БИТЫЕ ССЫЛКИ · ${note.broken.length}</div><div class="rail-rows">${
       note.broken.map(b => `<div data-broken="${escA(b)}" title="создать эту заметку"><span class="nm">${escA(b)}</span><span class="zn">СОЗДАТЬ</span></div>`).join('')}</div></div>` : ''}
+
+    ${claimsPanel(note)}
 
     <div class="panel" id="n-similar"><div class="hd">ПОХОЖИЕ</div><div class="rail-rows"><div style="cursor:default;color:var(--dim);font-size:10px">ищу…</div></div></div>
 
