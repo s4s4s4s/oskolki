@@ -39,7 +39,7 @@ const TRANSLIT = {
   ю: 'yu', я: 'ya',
 };
 
-function translit(w) { let out = ''; for (const ch of w) out += TRANSLIT[ch] ?? ch; return out; }
+export function translit(w) { let out = ''; for (const ch of w) out += TRANSLIT[ch] ?? ch; return out; }
 
 function stripSuffix(w) {
   for (const s of SUFFIXES) if (w.length - s.length >= 4 && w.endsWith(s)) return w.slice(0, w.length - s.length);

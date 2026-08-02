@@ -11,6 +11,7 @@ import { appendThought, dailyPath, createNote, safeFileName, addSection, patchSe
 import { LINK_TYPES, TYPE_OF_FIELD, FIELD_OF_TYPE } from './frontmatter.js';
 import { parseQuery, filterNotes, matches, hasFilters, describe, FIELDS } from './query.js';
 import { diffLines, collapseSame } from './diff.js';
+import { similarTo, buildClusters } from './similar.js';
 
 export const $ = (sel, el = document) => el.querySelector(sel);
 export const el = (tag, cls, html) => { const d = document.createElement(tag); if (cls) d.className = cls; if (html != null) d.innerHTML = html; return d; };
@@ -118,7 +119,11 @@ export function renderGraph(root, state) {
         <button class="radio on" data-layout="zones">▸ КЛАСТЕРЫ / ЗОНЫ</button>
         <button class="radio" data-layout="force">&nbsp;&nbsp;СИЛОВАЯ</button>
         <button class="radio" data-layout="fresh">&nbsp;&nbsp;СВЕЖЕСТЬ</button>
-        <button class="radio" data-layout="deps" title="слои по depends_on и blocks: что раньше, что позже, где циклы">&nbsp;&nbsp;ЗАВИСИМОСТИ</button></div>
+        <button class="radio" data-layout="deps" title="слои по depends_on и blocks: что раньше, что позже, где циклы">&nbsp;&nbsp;ЗАВИСИМОСТИ</button>
+        <button class="radio" data-layout="clusters" title="группы по смыслу: считаются из графа связей, а не из папок">&nbsp;&nbsp;СМЫСЛ</button></div>
+      <div class="blk"><span class="lbl">ОБЗОР</span><div class="seg">
+        <button class="chip" data-fold title="свернуть созвездия в объекты: на большой карте видно, что с чем связано, а физика не считается вовсе">◈ СВЕРНУТЬ</button>
+        <button class="chip" data-ego title="показывать только окрестность выбранного узла — два шага по связям">◎ ОКРЕСТНОСТЬ</button></div></div>
       <div class="blk"><span class="lbl">КОДИРОВКА</span>
         <div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:6px">
           <button class="chip on" data-color="zone">ЗОНА</button><button class="chip" data-color="fresh">СВЕЖ</button><button class="chip" data-color="deg">СВЯЗ</button></div>
@@ -161,8 +166,27 @@ export function renderGraph(root, state) {
     },
     onSelect: showRead,
     onOpen: openNote,
+    // Клик по свёрнутому созвездию разворачивает именно его: с общего плана
+    // проваливаешься внутрь, а не разворачиваешь всю карту обратно.
+    onCluster(s) {
+      graph.collapse(false);
+      $('[data-fold]', root).classList.remove('on');
+      if (graph.layout === 'clusters') {
+        graph.focusCluster = s.i;
+        graph.refreshFilter(); graph._userMoved = false; graph.settle(200);
+        toast(`СОЗВЕЗДИЕ «${s.label}» · ${s.m} ${plural(s.m, 'ЗАМЕТКА', 'ЗАМЕТКИ', 'ЗАМЕТОК')} · ESC — НАЗАД КО ВСЕЙ КАРТЕ`, '', 5000);
+      }
+    },
   });
   state.graph = graph;
+
+  // Кластеры считаются один раз и лениво: они нужны только тем, кто открыл
+  // раскладку «смысл» или свёртку, а на старте графа это лишняя работа.
+  const withClusters = async () => {
+    const cl = await buildClusters();      // сам кэширует и пересчитывает после нового индекса
+    if (cl !== graph.clusters) graph.setClusters(cl);
+    return cl;
+  };
 
   const zonesBox = $('#g-zones', root);
   const drawZones = () => {
@@ -193,9 +217,15 @@ export function renderGraph(root, state) {
   };
   $('#g-foot', root).innerHTML = foot();
 
-  root.querySelectorAll('[data-layout]').forEach(b => b.addEventListener('click', () => {
+  root.querySelectorAll('[data-layout]').forEach(b => b.addEventListener('click', async () => {
     root.querySelectorAll('[data-layout]').forEach(x => { x.classList.remove('on'); x.innerHTML = '&nbsp;&nbsp;' + x.textContent.trim().replace(/^▸ /, ''); });
     b.classList.add('on'); b.innerHTML = '▸ ' + b.textContent.trim();
+    if (b.dataset.layout === 'clusters') {
+      const cl = await withClusters();
+      if (!cl?.list.length) { toast('КЛАСТЕРЫ НЕ СЧИТАЮТСЯ: В КОРПУСЕ НЕТ СВЯЗЕЙ', 'warn'); return; }
+      toast(`СОЗВЕЗДИЙ ПО СМЫСЛУ: ${cl.list.length} · САМОЕ КРУПНОЕ «${cl.list[0].label}» (${cl.list[0].size})`, '', 6000);
+    }
+    graph.focusCluster = null;
     graph.set({ layout: b.dataset.layout });
     graph.settle(300);
     if (b.dataset.layout === 'deps') {
@@ -220,6 +250,27 @@ export function renderGraph(root, state) {
     drawZones(); graph.refreshFilter(); graph.fit(); graph.heat(.35);
   }));
   $('#g-filter', root).addEventListener('input', e => { graph.filterText = e.target.value; graph.refreshFilter(); });
+
+  $('[data-fold]', root).addEventListener('click', async e => {
+    const btn = e.currentTarget;          // после await currentTarget уже null — событие отработало
+    const on = !btn.classList.contains('on');
+    // Свёртка по смыслу требует кластеров; в остальных раскладках сворачиваем
+    // по зонам — это те же созвездия, что человек уже видит на карте.
+    const by = graph.layout === 'clusters' ? 'cluster' : 'zone';
+    if (on && by === 'cluster') await withClusters();
+    btn.classList.toggle('on', on);
+    graph.focusCluster = null; graph.refreshFilter();
+    graph.collapse(on, by);
+    if (on) toast(`СВЁРНУТО В ${graph.superNodes.length} ${plural(graph.superNodes.length, 'ОБЪЕКТ', 'ОБЪЕКТА', 'ОБЪЕКТОВ')} · КЛИК — РАЗВЕРНУТЬ ОДНО`, '', 5000);
+    else graph.settle(250);
+  });
+  $('[data-ego]', root).addEventListener('click', e => {
+    const on = !e.currentTarget.classList.contains('on');
+    e.currentTarget.classList.toggle('on', on);
+    graph.set({ scope: on ? 'ego' : 'all' });
+    graph.settle(200);
+    if (on && !graph.selected) toast('ВЫБЕРИТЕ УЗЕЛ — ПОКАЖУ ЕГО ОКРЕСТНОСТЬ НА ДВА ШАГА', 'warn');
+  });
 
   graph.start();
   drawSyncChip();
@@ -337,7 +388,26 @@ function drawRail(root, rail, note, sections, reload, path) {
     ${note?.broken?.length ? `<div class="panel"><div class="hd" style="color:var(--red)">БИТЫЕ ССЫЛКИ · ${note.broken.length}</div><div class="rail-rows">${
       note.broken.map(b => `<div data-broken="${escA(b)}" title="создать эту заметку"><span class="nm">${escA(b)}</span><span class="zn">СОЗДАТЬ</span></div>`).join('')}</div></div>` : ''}
 
+    <div class="panel" id="n-similar"><div class="hd">ПОХОЖИЕ</div><div class="rail-rows"><div style="cursor:default;color:var(--dim);font-size:10px">ищу…</div></div></div>
+
     <div class="panel"><div class="hd">ОГЛАВЛЕНИЕ</div><div class="toc">${sections.filter(s => s.heading).map(s => `<div data-h="h-${sections.indexOf(s)}">${'#'.repeat(s.level)} ${s.heading}</div>`).join('') || '<div style="cursor:default">без заголовков</div>'}</div></div>`;
+
+  // Похожие — это ответ на «а где я про это уже писал». Связи показывают то, что
+  // я сам когда-то связал; похожие — то, что связано по существу, но руки не
+  // дошли. Считается по редким общим словам, поэтому находит и ненамеренное.
+  if (note) similarTo(note, 7).then(sim => {
+    const box = $('#n-similar', rail);
+    if (!box) return;
+    box.innerHTML = `<div class="hd">ПОХОЖИЕ · ${sim.length}</div><div class="rail-rows">${
+      sim.map(({ note: o, score }) => `<div data-p="${escA(o.path)}" title="близость ${score}">${zoneDot(o.zoneRef)}<span class="nm">${o.title}</span><span class="zn">${zn(o)}</span></div>`).join('')
+      || '<div style="cursor:default;color:var(--dim);font-size:10px">ничего похожего не нашлось</div>'}</div>${
+      sim.length ? '<div style="padding:6px 12px"><button class="btn-line" data-linksim style="width:100%">СВЯЗАТЬ С ПЕРВОЙ</button></div>' : ''}`;
+    box.querySelectorAll('[data-p]').forEach(r => r.addEventListener('click', () => { location.hash = `#/note/${encodeURIComponent(r.dataset.p)}`; }));
+    $('[data-linksim]', box)?.addEventListener('click', async () => {
+      try { await linkTo(path, 'relates', sim[0].note.title); toast(`СВЯЗАНО С «${sim[0].note.title}»`); reload(); }
+      catch (err) { toast(`НЕ ВЫШЛО: ${err.message}`, 'err'); }
+    });
+  }).catch(() => { const box = $('#n-similar', rail); if (box) box.remove(); });
 
   rail.querySelectorAll('[data-p]').forEach(r => r.addEventListener('click', e => {
     if (e.target.dataset.unlink) return;

@@ -14,6 +14,11 @@ export class GraphView {
     this.cb = cb; // {onHover(note|null,x,y), onSelect(note|null), onOpen(note)}
     this.layout = 'zones'; this.colorBy = 'zone'; this.sizeBy = 'bytes';
     this.filterText = ''; this.selected = null; this.hovered = null;
+    this.clusters = null;            // {list,byNote} из similar.js — раскладка «по смыслу»
+    this.collapsed = false;          // созвездия свёрнуты в объекты
+    this.scope = 'all';              // all | ego — только окрестность выбранного
+    this.egoDepth = 2;
+    this.focusCluster = null;
     this.cam = { x: 0, y: 0, k: 1 };
     this.running = false;
     this._userMoved = false;
@@ -134,7 +139,103 @@ export class GraphView {
         const a = s.angle + (hash(n.note.path) - .5) * s.span * .8;
         n.ax = Math.cos(a) * r; n.ay = Math.sin(a) * r * .8; n.pull = .03;
       }
+    } else if (this.layout === 'clusters' && this.clusters) {
+      // Кластеры Лувена по кругу, внутри каждого — плотный диск. Место в диске
+      // берётся из хеша пути, поэтому заметка каждый раз оказывается на своём
+      // месте: карту можно запоминать глазами.
+      const cl = this.clusters.list;
+      const R = 170 + N.length * 1.25;
+      const w = cl.map(c => Math.sqrt(c.size));
+      const tot = w.reduce((a, b) => a + b, 0) || 1;
+      let acc = 0;
+      const centers = cl.map((c, i) => {
+        const span = w[i] / tot * Math.PI * 2;
+        const a = acc + span / 2 - Math.PI / 2; acc += span;
+        return { x: Math.cos(a) * R, y: Math.sin(a) * R * .72, r: 26 + Math.sqrt(c.size) * 11 };
+      });
+      this._clusterCenters = centers;
+      for (const n of N) {
+        const ci = this.clusters.byNote.get(n.note);
+        const c = centers[ci] || { x: 0, y: 0, r: 40 };
+        const a = hash(n.note.path) * Math.PI * 2, rr = Math.sqrt(hash(n.note.path + '·')) * c.r;
+        n.cluster = ci; n.ax = c.x + Math.cos(a) * rr; n.ay = c.y + Math.sin(a) * rr; n.pull = .05;
+      }
+      return;
     } else { for (const n of N) { n.ax = 0; n.ay = 0; n.pull = .0022; } }
+  }
+
+  setClusters(clusters) {
+    this.clusters = clusters;
+    if (this.layout === 'clusters') { this._applyAnchors(); this._applyFilter(); this.heat(1); }
+  }
+
+  /* Свёрнутые созвездия. На десяти тысячах узлов честная картинка — это каша из
+     точек: физика считается, кадр рисуется, а понять по нему нельзя ничего.
+     В свёрнутом виде каждое созвездие — один объект размером по числу заметок,
+     связи между созвездиями — по числу связей между их членами. Физика при этом
+     не считается вовсе (узлы стоят на якорях), то есть режим не просто понятнее,
+     а ещё и дешевле на два порядка. Клик разворачивает одно созвездие. */
+  _buildSuper() {
+    const groups = this.collapseBy === 'zone'
+      ? { list: this.model.zones.map(z => ({ label: z.label || z.name.toUpperCase(), color: z.color })), of: n => this.model.zones.indexOf(n.note.zoneRef) }
+      : this.clusters
+        ? { list: this.clusters.list.map(c => ({ label: c.label, color: null })), of: n => this.clusters.byNote.get(n.note) }
+        : null;
+    if (!groups) { this.superNodes = null; return; }
+    const acc = groups.list.map(() => ({ x: 0, y: 0, m: 0, colors: new Map() }));
+    for (const n of this.nodes) {
+      const i = groups.of(n);
+      if (i === undefined || !acc[i] || !isVisible(n.note)) continue;
+      acc[i].x += n.x; acc[i].y += n.y; acc[i].m++;
+      acc[i].colors.set(n.color, (acc[i].colors.get(n.color) || 0) + 1);
+    }
+    this.superNodes = groups.list.map((g, i) => {
+      const a = acc[i];
+      if (!a.m) return null;
+      const color = g.color || [...a.colors].sort((x, y) => y[1] - x[1])[0][0];
+      return { i, label: g.label, x: a.x / a.m, y: a.y / a.m, m: a.m, r: 9 + Math.sqrt(a.m) * 3.4, color, rot: i % 2 ? Math.PI / 4 : 0 };
+    }).filter(Boolean);
+    const byIdx = new Map(this.superNodes.map(s => [s.i, s]));
+    const w = new Map();
+    for (const l of this.links) {
+      const a = groups.of(l.a), b = groups.of(l.b);
+      if (a === undefined || b === undefined || a === b) continue;
+      const key = a < b ? `${a}|${b}` : `${b}|${a}`;
+      w.set(key, (w.get(key) || 0) + 1);
+    }
+    this.superLinks = [...w].map(([key, n]) => {
+      const [a, b] = key.split('|').map(Number);
+      return { a: byIdx.get(a), b: byIdx.get(b), n };
+    }).filter(l => l.a && l.b);
+  }
+
+  collapse(on, by = 'cluster') {
+    this.collapseBy = by;
+    this.collapsed = on;
+    if (on) { for (const n of this.nodes) { n.x = n.ax; n.y = n.ay; n.vx = n.vy = 0; } this._buildSuper(); this._heat = 0; this.fit(); }
+    else { this.heat(.6); }
+  }
+
+  // Эго-граф: заметка и всё, до чего от неё N шагов. На большой карте это
+  // единственный способ увидеть окружение конкретной вещи, а не весь космос.
+  _egoSet(root, depth) {
+    if (!this._adj || this._adjFor !== this.links) {
+      const adj = new Map();
+      for (const l of this.links) {
+        if (!adj.has(l.a)) adj.set(l.a, []); if (!adj.has(l.b)) adj.set(l.b, []);
+        adj.get(l.a).push(l.b); adj.get(l.b).push(l.a);
+      }
+      this._adj = adj; this._adjFor = this.links;
+    }
+    const seen = new Set([root]);
+    let front = [root];
+    for (let d = 0; d < depth; d++) {
+      const next = [];
+      for (const n of front) for (const m of this._adj.get(n) || []) if (!seen.has(m)) { seen.add(m); next.push(m); }
+      front = next;
+      if (!front.length) break;
+    }
+    return seen;
   }
 
   _applyStyle() {
@@ -159,7 +260,10 @@ export class GraphView {
 
   _applyFilter() {
     const q = this.filterText.trim().toLowerCase();
+    const ego = this.scope === 'ego' && this.selected ? this._egoSet(this.selected, this.egoDepth) : null;
     for (const n of this.nodes) {
+      if (ego && !ego.has(n)) { n.dim = true; continue; }
+      if (this.focusCluster != null && this.clusters && this.clusters.byNote.get(n.note) !== this.focusCluster) { n.dim = true; continue; }
       const on = isVisible(n.note);
       const txtOk = !q || n.note.title.toLowerCase().includes(q) || n.note.path.toLowerCase().includes(q)
         || (n.note.tags || []).some(t => t.includes(q));
@@ -233,6 +337,7 @@ export class GraphView {
 
   _tick() {
     const N = this.nodes; const heat = this._heat;
+    if (this.collapsed) return;      // свёрнутая карта стоит на якорях — считать нечего
     if (heat < .003) return;
     this._heat *= .985;
     const rep = 1800, spring = .02, len = 72;
@@ -274,7 +379,7 @@ export class GraphView {
 
   // вписать граф в окно (пока пользователь сам не двигал камеру)
   fit({ margin = 70, smooth = false } = {}) {
-    const vis = this.nodes.filter(n => !n.dim);
+    const vis = this.collapsed && this.superNodes?.length ? this.superNodes : this.nodes.filter(n => !n.dim);
     if (!vis.length || !this._dpr) return;
     let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
     for (const n of vis) { x0 = Math.min(x0, n.x - n.r); y0 = Math.min(y0, n.y - n.r); x1 = Math.max(x1, n.x + n.r); y1 = Math.max(y1, n.y + n.r); }
@@ -299,6 +404,8 @@ export class GraphView {
     for (const d of this._dust) { ctx.globalAlpha = d.o; ctx.fillStyle = '#cdd3ea'; ctx.fillRect(d.x * w, d.y * h, d.s, d.s); }
     ctx.globalAlpha = 1;
     ctx.translate(w / 2 + cam.x, h / 2 + cam.y); ctx.scale(cam.k, cam.k);
+
+    if (this.collapsed && this.superNodes) { this._renderSuper(ctx, w, h, dpr); return; }
 
     const sel = this.selected, hov = this.hovered;
     const nb = sel ? new Set([sel, ...this.links.filter(l => l.a === sel || l.b === sel).flatMap(l => [l.a, l.b])]) : null;
@@ -340,18 +447,40 @@ export class GraphView {
     ctx.save(); ctx.scale(dpr, dpr);
     const k = cam.k;
     const ss = (a, b, x) => { const t = Math.max(0, Math.min(1, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
-    const taken = [];
-    const solids = [];
+    /* Подпись не должна налезать ни на другую подпись, ни на узел. Проверка
+       «каждый прямоугольник против всех» — это O(n²): на десяти тысячах узлов
+       один только этот проход съедал треть кадра. Кладём занятые места в сетку
+       ячейками по 64 пикселя и проверяем только соседние ячейки — цена перестаёт
+       зависеть от размера вальта. */
+    const CELL = 64;
+    const grid = new Map();
+    const cellsOf = r => {
+      const out = [];
+      for (let cx = Math.floor(r.x / CELL); cx <= Math.floor((r.x + r.w) / CELL); cx++)
+        for (let cy = Math.floor(r.y / CELL); cy <= Math.floor((r.y + r.h) / CELL); cy++) out.push(cx + ',' + cy);
+      return out;
+    };
+    const mark = r => { for (const c of cellsOf(r)) { let a = grid.get(c); if (!a) grid.set(c, a = []); a.push(r); } };
+    const hits = (r, pad) => {
+      for (const c of cellsOf({ x: r.x - pad, y: r.y - pad, w: r.w + pad * 2, h: r.h + pad * 2 })) {
+        for (const o of grid.get(c) || []) {
+          if (o.own === r.own && o.own) continue;                 // собственный узел подписи не мешает
+          const px = o.solid ? 0 : 6, py = o.solid ? 0 : 2;
+          if (r.x < o.x + o.w + px && r.x + r.w > o.x - px && r.y < o.y + o.h + py && r.y + r.h > o.y - py) return true;
+        }
+      }
+      return false;
+    };
     for (const n of this.nodes) {
       if (n.dim || (nb && !nb.has(n) && n !== hov)) continue;
       const p = this._toScreen(n.x, n.y), rk = n.r * k * 2.2 + 2;
-      solids.push({ n, x: p.x - rk, y: p.y - rk, w: rk * 2, h: rk * 2 });
+      if (p.x < -60 || p.x > w + 60 || p.y < -60 || p.y > h + 60) continue;   // за кадром — не мешает никому
+      mark({ x: p.x - rk, y: p.y - rk, w: rk * 2, h: rk * 2, solid: true, own: n });
     }
     ctx.lineJoin = 'round';
     const fitK = this._fitK || 1;
-    const clash = (rect, own) =>
-      taken.some(r => rect.x < r.x + r.w + 6 && rect.x + rect.w > r.x - 6 && rect.y < r.y + r.h + 2 && rect.y + rect.h > r.y - 2) ||
-      solids.some(s => s.n !== own && rect.x < s.x + s.w && rect.x + rect.w > s.x && rect.y < s.y + s.h && rect.y + rect.h > s.y);
+    const taken = { push: mark };           // прежний интерфейс: подписи тоже занимают место
+    const clash = (rect, own) => hits({ ...rect, own }, 0);
     // панель «УЗЕЛ // ВЫБРАН» — запретная зона для подписей
     if (sel) taken.push({ x: w - 330, y: 0, w: 330, h: 196 });
     // созвездия видны только когда подписи шардов уже погасли (жёсткое разделение)
@@ -445,6 +574,64 @@ export class GraphView {
     }
   }
 
+  // Свёрнутая карта: десятки объектов вместо тысяч точек. Толщина связи — число
+  // связей между созвездиями, размер — число заметок, подпись видна всегда:
+  // на этом уровне важно не «какая заметка», а «что с чем вообще связано».
+  _renderSuper(ctx, w, h, dpr) {
+    const hov = this._hovSuper;
+    for (const l of this.superLinks) {
+      const hl = hov && (l.a === hov || l.b === hov);
+      ctx.strokeStyle = hl ? 'rgba(240,168,96,.8)' : 'rgba(74,84,112,.42)';
+      ctx.lineWidth = Math.min(6, .6 + Math.log2(l.n + 1)) / this.cam.k;
+      ctx.beginPath(); ctx.moveTo(l.a.x, l.a.y); ctx.lineTo(l.b.x, l.b.y); ctx.stroke();
+    }
+    for (const s of this.superNodes) {
+      ctx.save(); ctx.translate(s.x, s.y); ctx.rotate(s.rot);
+      const spr = this._sprite(s === hov ? '#f0a860' : s.color, s.r, s === hov);
+      ctx.drawImage(spr.c, -spr.size / 2, -spr.size / 2, spr.size, spr.size);
+      ctx.restore();
+    }
+    ctx.restore();
+    ctx.save(); ctx.scale(dpr, dpr);
+    ctx.font = '500 10px "IBM Plex Mono",monospace';
+    try { ctx.letterSpacing = '1.6px'; } catch {}
+    ctx.textAlign = 'center';
+    const taken = [];
+    for (const s of [...this.superNodes].sort((a, b) => b.m - a.m)) {
+      const p = this._toScreen(s.x, s.y);
+      const label = s.label.length > 34 ? s.label.slice(0, 32) + '…' : s.label;
+      const tw = ctx.measureText(label).width;
+      let py = p.y + s.r * this.cam.k + 15, rect = null;
+      for (let t = 0; t < 3; t++) {
+        const r2 = { x: p.x - tw / 2 - 3, y: py - 11, w: tw + 6, h: 15 };
+        if (!taken.some(r => r2.x < r.x + r.w + 5 && r2.x + r2.w > r.x - 5 && r2.y < r.y + r.h && r2.y + r2.h > r.y)) { rect = r2; break; }
+        py += 15;
+      }
+      if (!rect) continue;
+      taken.push(rect);
+      ctx.shadowColor = '#131519'; ctx.shadowBlur = 8;
+      ctx.fillStyle = s === hov ? '#ffdca6' : '#93a0b8';
+      ctx.fillText(label, Math.round(p.x), Math.round(py));
+      ctx.fillText(label, Math.round(p.x), Math.round(py));
+      ctx.fillStyle = 'rgba(147,160,184,.55)';
+      ctx.fillText(`${s.m}`, Math.round(p.x), Math.round(py + 12));
+      ctx.shadowBlur = 0;
+    }
+    ctx.textAlign = 'start';
+    ctx.restore();
+  }
+
+  _pickSuper(sx, sy) {
+    if (!this.superNodes) return null;
+    const p = this._toWorld(sx, sy);
+    let best = null, bd = 1e9;
+    for (const s of this.superNodes) {
+      const d = Math.hypot(s.x - p.x, s.y - p.y);
+      if (d < s.r + 10 / this.cam.k && d < bd) { best = s; bd = d; }
+    }
+    return best;
+  }
+
   _toScreen(x, y) { const w = this.canvas.width / this._dpr, h = this.canvas.height / this._dpr; return { x: (x * this.cam.k) + w / 2 + this.cam.x, y: (y * this.cam.k) + h / 2 + this.cam.y }; }
 
   // спрайт узла: roundRect + настоящий shadowBlur (как box-shadow в макете), кэш по цвету/размеру
@@ -470,6 +657,7 @@ export class GraphView {
   _toWorld(sx, sy) { const w = this.canvas.width / this._dpr, h = this.canvas.height / this._dpr; return { x: (sx - w / 2 - this.cam.x) / this.cam.k, y: (sy - h / 2 - this.cam.y) / this.cam.k }; }
 
   _pick(sx, sy) {
+    if (this.collapsed) return null;
     const p = this._toWorld(sx, sy);
     let best = null, bd = 1e9;
     for (const n of this.nodes) {
@@ -490,6 +678,9 @@ export class GraphView {
         const dx = e.offsetX - drag.x, dy = e.offsetY - drag.y;
         if (Math.abs(dx) + Math.abs(dy) > 3) { moved = true; this._userMoved = true; }
         this.cam.x += dx; this.cam.y += dy; drag = { x: e.offsetX, y: e.offsetY };
+      } else if (this.collapsed) {
+        const s = this._pickSuper(e.offsetX, e.offsetY);
+        if (s !== this._hovSuper) { this._hovSuper = s; c.style.cursor = s ? 'pointer' : ''; }
       } else {
         const n = this._pick(e.offsetX, e.offsetY);
         if (n !== this.hovered) { this.hovered = n; this.cb.onHover(n ? n.note : null, e.offsetX, e.offsetY); c.style.cursor = n ? 'pointer' : ''; }
@@ -499,9 +690,14 @@ export class GraphView {
     c.addEventListener('pointerup', e => {
       c.classList.remove('drag');
       if (drag && !moved) {
+        if (this.collapsed) {
+          const s = this._pickSuper(e.offsetX, e.offsetY);
+          if (s) this.cb.onCluster?.(s);
+          drag = null; return;
+        }
         const n = this._pick(e.offsetX, e.offsetY);
         if (n && this.selected === n) this.cb.onOpen(n.note);
-        else { this.selected = n; this.cb.onSelect(n ? n.note : null); }
+        else { this.selected = n; this.cb.onSelect(n ? n.note : null); if (this.scope === 'ego') { this._applyFilter(); this._userMoved = false; this.heat(.5); } }
       }
       drag = null;
     });
@@ -524,12 +720,17 @@ export class GraphView {
     this._userMoved = true;
     const dirs = { ArrowRight: [1, 0], ArrowLeft: [-1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
     if (e.key === 'Enter' && this.selected) { this.cb.onOpen(this.selected.note); return true; }
-    if (e.key === 'Escape' && this.selected) { this.selected = null; this.cb.onSelect(null); return true; }
+    if (e.key === 'Escape' && (this.selected || this.focusCluster != null)) {
+      const back = this.focusCluster != null;
+      this.focusCluster = null; this.selected = null; this.cb.onSelect(null);
+      if (back) { this._applyFilter(); this._userMoved = false; this.heat(.5); } else this._afterSelect();
+      return true;
+    }
     if (e.key === 'Tab') {
       const vis = this.nodes.filter(n => !n.dim); if (!vis.length) return false;
       const i = vis.indexOf(this.selected);
       this.selected = vis[(i + (e.shiftKey ? -1 : 1) + vis.length) % vis.length];
-      this._center(this.selected); this.cb.onSelect(this.selected.note); return true;
+      this._center(this.selected); this.cb.onSelect(this.selected.note); this._afterSelect(); return true;
     }
     const d = dirs[e.key];
     if (!d) return false;
@@ -547,9 +748,10 @@ export class GraphView {
       }
       if (best) this.selected = best;
     }
-    if (this.selected) { this._center(this.selected); this.cb.onSelect(this.selected.note); }
+    if (this.selected) { this._center(this.selected); this.cb.onSelect(this.selected.note); this._afterSelect(); }
     return true;
   }
+  _afterSelect() { if (this.scope === 'ego') { this._applyFilter(); this.heat(.5); } }
   _center(n) {
     const p = this._toScreen(n.x, n.y);
     const w = this.canvas.width / this._dpr, h = this.canvas.height / this._dpr;
