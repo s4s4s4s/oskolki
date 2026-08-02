@@ -2,6 +2,7 @@
 // размером, фильтры, пан/зум, наведение, выбор, клавиатура.
 // 3D-режим — задел для three.js (см. README).
 import { ageHours } from './md.js';
+import { isVisible } from './corpus.js';
 
 const lerp = (a, b, t) => a + (b - a) * t;
 function hexToRgb(h) { const n = parseInt(h.slice(1), 16); return [n >> 16 & 255, n >> 8 & 255, n & 255]; }
@@ -97,9 +98,10 @@ export class GraphView {
   _applyFilter() {
     const q = this.filterText.trim().toLowerCase();
     for (const n of this.nodes) {
-      const zoneOn = n.note.zoneRef.on;
-      const txtOk = !q || n.note.title.toLowerCase().includes(q) || n.note.path.toLowerCase().includes(q);
-      n.dim = !(zoneOn && txtOk);
+      const on = isVisible(n.note);
+      const txtOk = !q || n.note.title.toLowerCase().includes(q) || n.note.path.toLowerCase().includes(q)
+        || (n.note.tags || []).some(t => t.includes(q));
+      n.dim = !(on && txtOk);
     }
   }
 
@@ -108,24 +110,67 @@ export class GraphView {
 
   heat(h) { this._heat = Math.max(this._heat || 0, h); }
 
-  // ── физика ───────────────────────────────────────────────
+  /* ── физика ───────────────────────────────────────────────────────────────
+     Отталкивание каждого от каждого — это O(n²): на двух сотнях узлов 21 тысяча
+     пар за кадр (терпимо), на десяти тысячах — пятьдесят миллионов, то есть
+     граф просто не открывается. Barnes-Hut заменяет перебор обходом дерева:
+     далёкая группа узлов действует как одна точка в своём центре масс, и цена
+     падает до O(n log n) — те же десять тысяч обходятся сотней тысяч операций.
+
+     Порог THETA задаёт, что считать «далёкой»: 0 — честный перебор,
+     больше — грубее и быстрее. 0.8 — общепринятый компромисс, на глаз
+     неотличимо от точного расчёта. */
+  _repelBarnesHut(N, heat, rep) {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const n of N) {
+      if (n.x < minX) minX = n.x; if (n.x > maxX) maxX = n.x;
+      if (n.y < minY) minY = n.y; if (n.y > maxY) maxY = n.y;
+    }
+    const size = Math.max(maxX - minX, maxY - minY, 1) * 1.02;
+    const root = { x: minX, y: minY, s: size, cx: 0, cy: 0, m: 0, kids: null, node: null };
+
+    const insert = (q, node, depth) => {
+      if (q.m === 0 && !q.kids) { q.node = node; q.m = 1; q.cx = node.x; q.cy = node.y; return; }
+      if (!q.kids) {
+        // Лист занят: делим квадрат и переселяем прежнего жильца.
+        if (depth > 20) { q.m++; q.cx += (node.x - q.cx) / q.m; q.cy += (node.y - q.cy) / q.m; return; }
+        const h = q.s / 2;
+        q.kids = [0, 1, 2, 3].map(i => ({ x: q.x + (i % 2) * h, y: q.y + (i >> 1) * h, s: h, cx: 0, cy: 0, m: 0, kids: null, node: null }));
+        const old = q.node; q.node = null; q.m = 0; q.cx = 0; q.cy = 0;
+        insert(q, old, depth + 1);
+      }
+      q.m++; q.cx += (node.x - q.cx) / q.m; q.cy += (node.y - q.cy) / q.m;
+      const h = q.s / 2;
+      const i = (node.x >= q.x + h ? 1 : 0) + (node.y >= q.y + h ? 2 : 0);
+      insert(q.kids[i], node, depth + 1);
+    };
+    for (const n of N) insert(root, n, 0);
+
+    const THETA = 0.8;
+    const push = (q, node) => {
+      if (!q.m) return;
+      let dx = node.x - q.cx, dy = node.y - q.cy;
+      let d2 = dx * dx + dy * dy;
+      if (q.node === node && !q.kids) return;
+      if (!q.kids || (q.s * q.s) / Math.max(d2, 1e-6) < THETA * THETA) {
+        if (d2 < 1) { d2 = 1; dx = Math.random() - .5; dy = Math.random() - .5; }
+        if (d2 > 160000) return;                 // дальше этого расстояния сила пренебрежима
+        const d = Math.sqrt(d2);
+        const f = rep * q.m / d2 * heat;
+        node.vx += (dx / d) * f; node.vy += (dy / d) * f;
+        return;
+      }
+      for (const k of q.kids) push(k, node);
+    };
+    for (const n of N) push(root, n);
+  }
+
   _tick() {
     const N = this.nodes; const heat = this._heat;
     if (heat < .003) return;
     this._heat *= .985;
     const rep = 1800, spring = .02, len = 72;
-    for (let i = 0; i < N.length; i++) {
-      const a = N[i];
-      for (let j = i + 1; j < N.length; j++) {
-        const b = N[j];
-        let dx = a.x - b.x, dy = a.y - b.y;
-        let d2 = dx * dx + dy * dy; if (d2 < 1) { d2 = 1; dx = Math.random() - .5; dy = Math.random() - .5; }
-        if (d2 > 160000) continue;
-        const f = rep / d2 * heat;
-        const d = Math.sqrt(d2); dx /= d; dy /= d;
-        a.vx += dx * f; a.vy += dy * f; b.vx -= dx * f; b.vy -= dy * f;
-      }
-    }
+    this._repelBarnesHut(N, heat, rep);
     for (const l of this.links) {
       const dx = l.b.x - l.a.x, dy = l.b.y - l.a.y;
       const d = Math.sqrt(dx * dx + dy * dy) || 1;

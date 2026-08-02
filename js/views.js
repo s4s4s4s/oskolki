@@ -1,6 +1,7 @@
 // Экраны: подключение, граф, заметка, картотека, поиск + быстрая мысль + тосты.
 import { tools, isConflict, getSettings, saveSettings, clearSettings, initTransport, AuthError, NetError, IS_NATIVE } from './api.js';
-import { corpus, resolveWiki, searchCorpus } from './corpus.js';
+import { corpus, resolveWiki, searchCorpus, textOf, isVisible } from './corpus.js';
+import { withSnippets, noteText, forgetText } from './map.js';
 import { markTerms, queryTerms, parseSynonyms, parseServerSearch } from './search.js';
 import { splitFrontmatter, parseSections, renderMd, fmtBytes, fmtAge, plural } from './md.js';
 import { GraphView } from './graph.js';
@@ -120,6 +121,7 @@ export function renderGraph(root, state) {
           <button class="chip on" data-color="zone">ЗОНА</button><button class="chip" data-color="fresh">СВЕЖ</button><button class="chip" data-color="deg">СВЯЗ</button></div>
         <div style="display:flex;gap:5px;flex-wrap:wrap">
           <button class="chip on" data-size="bytes">ОБЪЁМ</button><button class="chip" data-size="deg">СВЯЗИ</button><button class="chip" data-size="commits">ПРАВКИ</button></div></div>
+      <div class="blk"><span class="lbl">СЛОИ</span><div id="g-layers" style="display:flex;gap:5px;flex-wrap:wrap"></div></div>
       <div class="blk"><span class="lbl">ЗОНЫ</span><div id="g-zones"></div></div>
       <div class="blk"><span class="lbl">ФИЛЬТР</span><input id="g-filter" placeholder="имя_заметки…" spellcheck="false"></div>
       <div class="foot" id="g-foot"></div>
@@ -167,8 +169,26 @@ export function renderGraph(root, state) {
       const z = corpus.zones[+b.dataset.z]; z.on = !z.on; drawZones(); graph.refreshFilter();
     }));
   };
+  // Слои — это `type` заметки: note, person, task, card… Карточки словаря
+  // выключены по умолчанию, иначе они одни забивают всю карту.
+  const layersBox = $('#g-layers', root);
+  const drawLayers = () => {
+    layersBox.innerHTML = corpus.layers.map((l, i) =>
+      `<button class="chip ${l.on ? 'on' : ''}" data-l="${i}" title="тип заметки из фронтматтера">${l.name.toUpperCase()} ${l.count}</button>`).join('');
+    layersBox.querySelectorAll('[data-l]').forEach(b => b.addEventListener('click', () => {
+      const l = corpus.layers[+b.dataset.l]; l.on = !l.on;
+      drawLayers(); graph.refreshFilter(); graph.fit(); graph.heat(.3);
+      $('#g-foot', root).innerHTML = foot();
+    }));
+  };
+  drawLayers();
   drawZones();
-  $('#g-foot', root).innerHTML = `УЗЛОВ ${corpus.notes.length} · РЁБЕР ${corpus.edges.length}<br>ИНДЕКС ${corpus.loadedAt ? corpus.loadedAt.toLocaleTimeString('ru') : '—'}<br>ПЕРЕСБОРКА ~30 С ПОСЛЕ ПУША`;
+  const foot = () => {
+    const vis = corpus.notes.filter(isVisible).length;
+    return `УЗЛОВ ${vis} ИЗ ${corpus.notes.length} · РЁБЕР ${corpus.edges.length}<br>`
+      + `${corpus.fromMap ? 'КАРТА' : 'ИНДЕКС'} ${corpus.loadedAt ? corpus.loadedAt.toLocaleTimeString('ru') : '—'}<br>ПЕРЕСБОРКА ~30 С ПОСЛЕ ПУША`;
+  };
+  $('#g-foot', root).innerHTML = foot();
 
   root.querySelectorAll('[data-layout]').forEach(b => b.addEventListener('click', () => {
     root.querySelectorAll('[data-layout]').forEach(x => { x.classList.remove('on'); x.innerHTML = '&nbsp;&nbsp;' + x.textContent.trim().replace(/^▸ /, ''); });
@@ -206,19 +226,20 @@ export async function renderNote(root, path) {
     <div class="note-main" id="n-main"><div class="splash" style="position:static;padding:60px 0"><span class="gem"></span><span class="st">ЧИТАЮ ЗАМЕТКУ…</span></div></div>
     <div class="note-rail" id="n-rail"></div></div></div>`;
 
-  if (note?.text) drawNote(root, path, note.text, note, true);   // мгновенно, из индекса
+  // Прочитанное однажды показываем мгновенно из кэша, а свежесть догоняем следом:
+  // на диске это неразличимо, по сети — разница между «сразу» и «через полсекунды».
+  let shown = false;
+  if (note?.text) { drawNote(root, path, note.text, note, true); shown = true; }
 
   let raw;
-  try { raw = await tools.read(path); }
+  try { raw = await textOf(note || path); }
   catch (e) {
-    if (note?.text) return;   // копия из индекса уже на экране — ошибку не показываем
+    if (shown) return;
     $('#n-main', root).innerHTML = `<div class="conflict">Не удалось прочитать «${path}»: ${e.message}</div>`;
     return;
   }
-  // Индекс хранит текст без фронтматтера и склеенный по кускам — поэтому
-  // сравниваем по телу, иначе перерисовка случалась бы на каждой заметке.
-  const sameBody = note?.text && splitFrontmatter(raw).body.replace(/\s+/g, ' ').trim() === note.text.replace(/\s+/g, ' ').trim();
-  if (!sameBody || !note) drawNote(root, path, raw, note, false);
+  const sameBody = shown && splitFrontmatter(raw).body.replace(/\s+/g, ' ').trim() === note.text.replace(/\s+/g, ' ').trim();
+  if (!sameBody) drawNote(root, path, raw, note, false);
 }
 
 function drawNote(root, path, raw, note, offline) {
@@ -422,7 +443,8 @@ export function renderCards(root) {
   };
   function rows() {
     const q = cardState.q.toLowerCase();
-    let list = corpus.notes.filter(n => n.zoneRef.on && (!q || n.title.toLowerCase().includes(q) || n.path.toLowerCase().includes(q)));
+    let list = corpus.notes.filter(n => isVisible(n)
+      && (!q || n.title.toLowerCase().includes(q) || n.path.toLowerCase().includes(q) || (n.tags || []).some(t => t.includes(q))));
     const by = {
       fresh: (a, b) => new Date(b.meta.h || 0) - new Date(a.meta.h || 0),
       size: (a, b) => b.meta.b - a.meta.b,
@@ -534,13 +556,17 @@ export function renderSearch(root, q) {
     .replace(/\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|([^\]]*))?\]\]/g, (m, t, a) => a || t)
     .replace(/\*\*/g, '').replace(/^(?:[-*]|>)\s+/gm, '');
 
-  function runLocal(query) {
+  async function runLocal(query) {
     const t0 = performance.now();
-    const { results, terms } = searchCorpus(query, 25);
+    const { results, terms } = await searchCorpus(query, 25);
+    const found = Math.round(performance.now() - t0);
+    // Фрагменты стоят чтения файлов, поэтому подтягиваются только для верхних
+    // результатов: остальное человек всё равно не увидит без прокрутки.
+    await withSnippets(results, terms, 6);
     const ms = performance.now() - t0;
     stats.innerHTML = `<span style="color:var(--amber-l)">${results.length} ${plural(results.length, 'СОВПАДЕНИЕ', 'СОВПАДЕНИЯ', 'СОВПАДЕНИЙ')}</span>`
-      + `<span>${Math.round(ms)} МС · В ПАМЯТИ</span><span style="margin-left:auto">ENTER — ОТКРЫТЬ ПЕРВОЕ</span>`;
-    resBox.innerHTML = rowsHtml(results.map(r => ({ ...r, fragHtml: markTerms(escA(cleanFrag(r.frag)), terms) })));
+      + `<span>${found} МС ПОИСК · ${Math.round(ms)} МС С ФРАГМЕНТАМИ</span><span style="margin-left:auto">ENTER — ОТКРЫТЬ ПЕРВОЕ</span>`;
+    resBox.innerHTML = rowsHtml(results.map(r => ({ ...r, fragHtml: r.frag ? markTerms(escA(cleanFrag(r.frag)), terms) : '<span style="color:var(--dim)">…</span>' })));
     hint.hidden = results.length > 0;
     if (!results.length) { hint.hidden = false; hint.textContent = 'В ПАМЯТИ НЕ НАЙДЕНО. ПОПРОБУЙТЕ СЕРВЕР — ОН ВИДИТ ПРАВКИ, КОТОРЫЕ ЕЩЁ НЕ ПОПАЛИ В ИНДЕКС ПРИЛОЖЕНИЯ.'; }
     wire();
@@ -635,10 +661,11 @@ export function renderAsk(root, q) {
     }));
   };
 
-  const collect = () => {
+  const collect = async () => {
     const question = input.value.trim();
     if (!question) return null;
-    const ctx = buildContext(question, { full: $('#a-full', root).checked });
+    stats.innerHTML = '<span>СОБИРАЮ КОНТЕКСТ…</span>';
+    const ctx = await buildContext(question, { full: $('#a-full', root).checked });
     askState.last = { question, ctx };
     drawCtx(ctx);
     if (!ctx.results.length) stats.innerHTML = `<span style="color:var(--red)">В ПАМЯТИ НИЧЕГО НЕ НАЙДЕНО ПО ЭТОМУ ВОПРОСУ</span>`;
@@ -646,7 +673,7 @@ export function renderAsk(root, q) {
   };
 
   async function run() {
-    const cur = collect();
+    const cur = await collect();
     if (!cur) return;
     if (!getAiSettings().key) {
       stats.innerHTML = `<span style="color:var(--amber-l)">КОНТЕКСТ СОБРАН</span><span>КОПИРУЙТЕ ПАКЕТ ИЛИ ДОБАВЬТЕ КЛЮЧ ANTHROPIC В «⚙ КЛЮЧ И MCP»</span>`;
@@ -680,7 +707,7 @@ export function renderAsk(root, q) {
   }
 
   const copyPack = async () => {
-    const cur = collect(); if (!cur) return;
+    const cur = await collect(); if (!cur) return;
     try {
       await navigator.clipboard.writeText(packForChat(cur.question, cur.ctx));
       toast(`ПАКЕТ В БУФЕРЕ · ${cur.ctx.results.length} ${plural(cur.ctx.results.length, 'ФРАГМЕНТ', 'ФРАГМЕНТА', 'ФРАГМЕНТОВ')} · ВСТАВЬТЕ В ЛЮБОЙ ЧАТ`);
@@ -694,6 +721,7 @@ export function renderAsk(root, q) {
     open('https://claude.ai/new', '_blank', 'noopener');
   });
   $('#a-full', root).addEventListener('change', e => { askState.full = e.target.checked; if (askState.last) collect(); });
+  askState.mode = askState.mode || 'fast';
   root.querySelectorAll('[data-am]').forEach(b => b.addEventListener('click', () => {
     askState.mode = b.dataset.am;
     root.querySelectorAll('[data-am]').forEach(x => x.classList.toggle('on', x === b));

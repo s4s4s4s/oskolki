@@ -1,23 +1,32 @@
-// Корпус: шарды индекса + meta.json → модель графа (заметки, связи, созвездия).
-// Здесь же живёт разбиение на зоны и подготовка данных для локального поиска.
+// Корпус: модель вальта, из которой живут граф, картотека, фильтры и поиск.
+//
+// Основной источник — карта (`_машина/карта`): лёгкая строка на заметку плюс
+// инвертированный словарь. Если карты нет (старый вальт, чужой воркер), корпус
+// собирается по-старому из кусков индекса — приложение обязано работать и там,
+// просто без тегов, типов и типизированных связей.
 import { tools } from './api.js';
 import { linksOf, plural } from './md.js';
-import { prepareChunks, parseSynonyms, searchChunks } from './search.js';
+import { fetchMap, applyMap, mapState, searchMap, noteText } from './map.js';
 import {
   INDEX_DIR, SYNONYMS_PATH, ZONE_PALETTE, ZONE_NAMES,
-  SPLIT_MIN, SUBZONE_MIN, CHRONICLE_ZONES, CHRONICLE_COLOR,
+  SPLIT_MIN, SUBZONE_MIN, CHRONICLE_ZONES, CHRONICLE_COLOR, HIDDEN_LAYERS, HIDDEN_ZONES,
 } from './config.js';
+import { prepareChunks, parseSynonyms, searchChunks } from './search.js';
 
 export const corpus = {
-  notes: [],           // {path, base, title, zone, zoneRef, text, chains, meta:{u,h,c,b}, out:[], in:[], deg}
+  notes: [],           // {path, base, title, zone, zoneRef, type, status, tags, meta, out, in, links, backlinks, deg}
   byPath: new Map(),
-  byBase: new Map(),   // нижний регистр короткого имени → note
+  byBase: new Map(),
   zones: [],           // {name, label, color, count, on, chronicle}
-  edges: [],           // [{a, b}] — объекты заметок
-  chunks: [],          // сырые куски индекса {p,h,t,i} — основа локального поиска
-  synonyms: '',        // текст _машина/синонимы.md, если удалось прочитать
+  edges: [],           // [{a, b, type}]
+  layers: [],          // {name, count, on} — тип заметки: note, person, card…
+  tagCounts: new Map(),
+  linkTypes: {},
+  chunks: [],          // только для старой схемы
+  synonyms: '',
   loadedAt: null,
-  fromCache: null,     // ISO-время сборки, если корпус поднят из офлайн-копии
+  fromCache: null,
+  fromMap: false,
 };
 
 const baseOf = p => p.replace(/\.md$/i, '').split('/').pop();
@@ -26,19 +35,14 @@ export const zoneLabel = zone => ZONE_NAMES[zone] || zone.split('/').pop().toUpp
 
 function hexToRgb(h) { const n = parseInt(h.slice(1), 16); return [n >> 16 & 255, n >> 8 & 255, n & 255]; }
 const clamp = v => Math.max(0, Math.min(255, Math.round(v)));
-// Оттенок подзоны: тот же цвет, чуть светлее или темнее — созвездия одной папки
-// читаются как семья, но не сливаются в одно пятно.
 function shade(hex, k) {
   const [r, g, b] = hexToRgb(hex);
   const t = k > 0 ? 255 : 0, a = Math.abs(k);
   return '#' + [r, g, b].map(c => clamp(c + (t - c) * a).toString(16).padStart(2, '0')).join('');
 }
 
-/* ── созвездия ────────────────────────────────────────────────────────────────
-   Папка первого уровня — созвездие. Если она крупная (SPLIT_MIN), её подпапки
-   от SUBZONE_MIN узлов отделяются в свои созвездия, остальное остаётся в
-   родительском. Так `brain` (70 заметок, треть корпуса) распадается на МОЗГ и
-   ЖУРНАЛ, а мелкие папки не дробятся в пыль. */
+/* ── созвездия ────────────────────────────────────────────────────────────── */
+
 export function zoneOfPath(path, splitSet) {
   const parts = path.split('/');
   if (parts.length < 2) return 'корень';
@@ -94,32 +98,90 @@ function buildZones(notes, prevOn) {
     return {
       name, label: zoneLabel(name), color, chronicle,
       count: notes.filter(n => n.zone === name).length,
-      on: prevOn.has(name) ? prevOn.get(name) : true,
+      on: prevOn.has(name) ? prevOn.get(name) : !HIDDEN_ZONES.includes(name),
     };
   });
 }
 
-/* ── модель ───────────────────────────────────────────────────────────────── */
+/* Слои — это `type` из фронтматтера: note, person, task, card, log… Карточки
+   SAT (сотни файлов и растут) раньше просто вырезались сборщиком; теперь они в
+   карте есть, но слой по умолчанию выключен. Решение «показывать или нет»
+   принимает человек, а не сборщик, и передумать можно без пересборки. */
+function buildLayers(notes, prevOn) {
+  const counts = new Map();
+  for (const n of notes) counts.set(n.type || '—', (counts.get(n.type || '—') || 0) + 1);
+  return [...counts].sort((a, b) => b[1] - a[1]).map(([name, count]) => ({
+    name, count,
+    on: prevOn.has(name) ? prevOn.get(name) : !HIDDEN_LAYERS.includes(name),
+  }));
+}
 
-// Разбор сырых кусков индекса в модель. Вынесено отдельно: этим же путём корпус
-// поднимается из офлайн-копии, без единого сетевого запроса.
+/* ── модель из карты ──────────────────────────────────────────────────────── */
+
+export function buildFromMap(map) {
+  const notes = map.notes.map(n => ({
+    path: n.p,
+    base: baseOf(n.p),
+    title: n.t || baseOf(n.p),
+    zone: '',
+    type: n.ty || '',
+    status: n.st || '',
+    tags: n.tg || [],
+    headings: n.hd || [],
+    broken: n.br || [],
+    meta: { u: n.u || null, h: n.h || null, c: n.c || 0, b: n.b || 0 },
+    out: [], in: [], links: [], backlinks: [], deg: 0,
+  }));
+
+  const byPath = new Map(notes.map(n => [n.path, n]));
+  const byBase = new Map();
+  for (const n of notes) if (!byBase.has(n.base.toLowerCase())) byBase.set(n.base.toLowerCase(), n);
+
+  const edges = [];
+  map.notes.forEach((raw, i) => {
+    const from = notes[i];
+    for (const [to, type] of raw.ln || []) {
+      const target = notes[to];
+      if (!target || target === from) continue;
+      from.links.push({ to: target, type });
+      target.backlinks.push({ from, type });
+      from.out.push(target); target.in.push(from);
+      from.deg++; target.deg++;
+      edges.push({ a: from, b: target, type });
+    }
+  });
+
+  const prevOn = new Map(corpus.zones.map(z => [z.name, z.on]));
+  const prevLayers = new Map(corpus.layers.map(l => [l.name, l.on]));
+  const zones = buildZones(notes, prevOn);
+  const zmap = new Map(zones.map(z => [z.name, z]));
+  for (const n of notes) n.zoneRef = zmap.get(n.zone);
+
+  const tagCounts = new Map(Object.entries(map.tags || {}).sort((a, b) => b[1] - a[1]));
+
+  return {
+    notes, byPath, byBase, zones, edges,
+    layers: buildLayers(notes, prevLayers),
+    tagCounts, linkTypes: map.linkTypes || {},
+    chunks: [], fromMap: true,
+  };
+}
+
+/* ── модель из старого индекса (запасной путь) ────────────────────────────── */
+
 export function buildModel(chunks, meta, synonyms) {
   const byPath = new Map();
   const indexRoot = INDEX_DIR.split('/')[0];
   for (const c of chunks) {
     if (!c.p || c.p.startsWith(indexRoot)) continue;
     let n = byPath.get(c.p);
-    if (!n) { n = { path: c.p, base: baseOf(c.p), title: baseOf(c.p), zone: '', _chunks: [], chains: [], out: [], in: [], deg: 0 }; byPath.set(c.p, n); }
+    if (!n) { n = { path: c.p, base: baseOf(c.p), title: baseOf(c.p), zone: '', type: '', status: '', tags: [], headings: [], broken: [], _chunks: [], links: [], backlinks: [], out: [], in: [], deg: 0 }; byPath.set(c.p, n); }
     n._chunks.push(c);
   }
   const notes = [...byPath.values()];
   for (const n of notes) {
     n._chunks.sort((a, b) => (a.i || 0) - (b.i || 0));
     n.text = n._chunks.map(c => c.t).join('\n\n');
-    n.chains = n._chunks.map(c => c.h || []);
-    // Мета может прийти пустой: индекс, собранный старым сборщиком, терял
-    // вложенные поля. Приложение не должно из-за этого показывать NaN — размер
-    // берём из текста, остальное честно оставляем пустым.
     const m = meta?.[n.path];
     n.meta = { u: m?.u ?? null, h: m?.h ?? null, c: m?.c ?? 0, b: m?.b ?? n.text.length };
     delete n._chunks;
@@ -135,7 +197,8 @@ export function buildModel(chunks, meta, synonyms) {
     const ek = n.path < t.path ? n.path + '|' + t.path : t.path + '|' + n.path;
     if (seen.has(ek)) continue;
     seen.add(ek);
-    edges.push({ a: n, b: t });
+    edges.push({ a: n, b: t, type: 'link' });
+    n.links.push({ to: t, type: 'link' }); t.backlinks.push({ from: n, type: 'link' });
     n.out.push(t); t.in.push(n); n.deg++; t.deg++;
   }
 
@@ -144,14 +207,24 @@ export function buildModel(chunks, meta, synonyms) {
   const zmap = new Map(zones.map(z => [z.name, z]));
   for (const n of notes) n.zoneRef = zmap.get(n.zone);
 
-  return { notes, byPath, byBase, zones, edges, chunks, synonyms };
+  return {
+    notes, byPath, byBase, zones, edges,
+    layers: buildLayers(notes, new Map()), tagCounts: new Map(), linkTypes: {},
+    chunks, synonyms, fromMap: false,
+  };
 }
 
 /* ── загрузка ─────────────────────────────────────────────────────────────── */
 
-// Сырые данные индекса отдельным шагом — их же кладём в офлайн-копию.
 export async function fetchIndex(onStep) {
-  onStep && onStep('читаю список шардов…');
+  // Сначала карта: она на порядок легче и знает про теги, типы и связи.
+  try {
+    const raw = await fetchMap(onStep);
+    return { kind: 'map', ...raw };
+  } catch {
+    onStep && onStep('карты нет — читаю индекс…');
+  }
+
   const listing = await tools.list(INDEX_DIR);
   const files = listing.split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('[папка]')).map(l => l.replace(/ \(\d+ б\)$/, ''));
   const shardFiles = files.filter(f => /\/\d+\.json$/.test(f));
@@ -163,40 +236,55 @@ export async function fetchIndex(onStep) {
   await Promise.all(Array.from({ length: 4 }, async () => {
     while (queue.length) { const f = queue.shift(); texts.push(await tools.read(f)); }
   }));
-  // BOM в начале файла роняет JSON.parse и уносит с собой весь корпус.
-  // Сборщик индекса его не ставит, но файл может быть переписан чем угодно —
-  // редактором, скриптом, PowerShell, — и терять из-за этого карту глупо.
   const json = t => JSON.parse(t.replace(/^﻿/, ''));
   const meta = metaFile ? json(await tools.read(metaFile)) : {};
-  // Словарь синонимов необязателен: без него локальный поиск просто не сводит
-  // разные корни («лечу» и «переезд»), всё остальное работает.
   const synonyms = await tools.read(SYNONYMS_PATH).catch(() => '');
-
-  const chunks = texts.flatMap(json);
-  return { chunks, meta, synonyms, at: new Date().toISOString() };
+  return { kind: 'index', chunks: texts.flatMap(json), meta, synonyms, at: new Date().toISOString() };
 }
 
 export function applyModel(model, { fromCache = null } = {}) {
   Object.assign(corpus, model, { loadedAt: new Date(), fromCache });
+  searchIndex = null;
   return corpus;
+}
+
+// Разбор сырых данных в модель — общий для сети и для офлайн-копии.
+export function modelFrom(raw) {
+  if (raw.kind === 'map' || raw.map) {
+    applyMap(raw);
+    return buildFromMap(raw.map);
+  }
+  return buildModel(raw.chunks, raw.meta, raw.synonyms);
 }
 
 export async function loadCorpus(onStep) {
   const raw = await fetchIndex(onStep);
   onStep && onStep('собираю граф…');
-  return applyModel(buildModel(raw.chunks, raw.meta, raw.synonyms));
+  return applyModel(modelFrom(raw));
 }
 
 export const resolveWiki = target => corpus.byBase.get(target.toLowerCase()) || corpus.byPath.get(target) || corpus.byPath.get(target + '.md') || null;
 
-/* ── локальный поиск ──────────────────────────────────────────────────────────
-   Основы слов считаются один раз на корпус и переживают перерисовки экрана;
-   пересчёт только когда пришёл новый индекс. На 1650 кусках подготовка занимает
-   десятки миллисекунд, поэтому делать её заранее на старте незачем — первый
-   поиск оплатит её сам. */
+/* Видимость заметки — пересечение двух фильтров: созвездие (папка) и слой (тип).
+   Оба нужны: папки отвечают на «где это лежит», типы — на «что это такое», и
+   на десяти тысячах заметок вопросы разные. */
+export const layerOn = type => {
+  const l = corpus.layers.find(x => x.name === (type || '—'));
+  return l ? l.on : true;
+};
+export const isVisible = n => n.zoneRef?.on !== false && layerOn(n.type);
+
+/* ── поиск ────────────────────────────────────────────────────────────────── */
+
 let searchIndex = null;
 
-export function searchCorpus(query, limit = 25) {
+// Возвращает {results:[{path,title,frag,rank,coverage}], terms}. На карте это
+// чтение нескольких шардов словаря, на старой схеме — перебор кусков в памяти.
+export async function searchCorpus(query, limit = 25) {
+  if (corpus.fromMap) {
+    const { results, terms } = await searchMap(query, limit);
+    return { results, terms };
+  }
   if (!searchIndex || searchIndex.src !== corpus.chunks) {
     searchIndex = {
       src: corpus.chunks,
@@ -207,4 +295,11 @@ export function searchCorpus(query, limit = 25) {
   return searchChunks(searchIndex.chunks, query, searchIndex.synonyms, limit);
 }
 
-export const searchReady = () => !!searchIndex;
+export const searchReady = () => corpus.fromMap ? mapState.loaded : !!searchIndex;
+
+// Текст заметки: из карты его нет, читаем сам файл (с кэшем). На старой схеме
+// текст уже лежит в модели.
+export async function textOf(note, opts) {
+  if (!corpus.fromMap && note.text) return note.text;
+  return noteText(note.path || note, opts);
+}

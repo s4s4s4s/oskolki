@@ -1,6 +1,6 @@
 // Точка входа: загрузка, роутер, верхняя/нижняя полосы, живой канал, клавиатура.
 import { getSettings, saveSettings, clearSettings, initTransport, liveChannel, transport, IS_NATIVE } from './api.js';
-import { fetchIndex, buildModel, applyModel, corpus } from './corpus.js';
+import { fetchIndex, modelFrom, applyModel, corpus } from './corpus.js';
 import { renderConnect, renderGraph, renderNote, renderCards, renderSearch, renderAsk, initCapture, initNoteCreator, toast, notePush, $ } from './views.js';
 import { IS_APP, INDEX_REBUILD_MS } from './config.js';
 import { loadIndexCache, saveIndexCache } from './store.js';
@@ -66,8 +66,8 @@ async function boot() {
 
   const cache = await loadIndexCache(cacheKey(s));
   let shown = false;
-  if (cache?.chunks?.length) {
-    applyModel(buildModel(cache.chunks, cache.meta, cache.synonyms), { fromCache: cache.at });
+  if (cache?.map || cache?.chunks?.length) {
+    applyModel(modelFrom(cache), { fromCache: cache.at });
     state.offline = fmtAge(cache.at);
     shown = true;
     route();
@@ -76,7 +76,7 @@ async function boot() {
 
   try {
     const raw = await fetchIndex(msg => { const b = $('#boot-st'); if (b) b.textContent = msg.toUpperCase(); });
-    applyModel(buildModel(raw.chunks, raw.meta, raw.synonyms));
+    applyModel(modelFrom(raw));
     state.offline = null;
     saveIndexCache(cacheKey(s), raw);
   } catch (e) {
@@ -188,9 +188,9 @@ async function refreshCorpus() {
   const s = currentSettings();
   try {
     const raw = await fetchIndex(() => {});
-    applyModel(buildModel(raw.chunks, raw.meta, raw.synonyms));
+    applyModel(modelFrom(raw));
     state.offline = null;
-    saveIndexCache(s.demo ? 'demo' : s.url, raw);
+    saveIndexCache(cacheKey(s), raw);
     toast('КОРПУС ОБНОВЛЁН');
     if (state.graph) state.graph.setModel(corpus);
     drawStrip(($('.tab.on') || {}).dataset?.r || 'graph');

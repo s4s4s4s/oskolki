@@ -17,6 +17,7 @@
 // Поэтому режим 2 включается только вручную, а приложение полноценно работает
 // и без него.
 import { corpus, searchCorpus } from './corpus.js';
+import { withSnippets, noteText } from './map.js';
 import { MODEL, AI_URL, AI_VERSION } from './config.js';
 
 const LS_KEY = 'shards.ai';
@@ -40,19 +41,22 @@ export const SYSTEM_PROMPT = `Ты отвечаешь на вопросы по �
 // Сколько фрагментов класть в пакет: больше — точнее, но дороже и медленнее.
 const DEFAULT_LIMIT = 8;
 
-export function buildContext(question, { limit = DEFAULT_LIMIT, full = false } = {}) {
-  const { results } = searchCorpus(question, limit);
-  const parts = results.map(r => {
-    const note = corpus.byPath.get(r.path);
-    const body = full && note ? note.text : r.frag;
+export async function buildContext(question, { limit = DEFAULT_LIMIT, full = false } = {}) {
+  const { results, terms } = await searchCorpus(question, limit);
+  // Фрагмент — это несколько сотен символов вокруг совпадения; «целиком» —
+  // вся заметка. Второе точнее и заметно дороже, поэтому включается вручную.
+  await withSnippets(results, terms, limit);
+  const bodies = await Promise.all(results.map(async r => {
+    if (!full) return r.frag || '';
+    try { return (await noteText(r.path)).replace(/^---\n[\s\S]*?\n---\n?/, ''); }
+    catch { return r.frag || ''; }
+  }));
+  const parts = results.map((r, i) => {
     const head = r.chain ? `${r.path} › ${r.chain}` : r.path;
-    return `--- ${head} ---\n${body}`;
+    return `--- ${head} ---\n${bodies[i]}`;
   });
-  return {
-    results,
-    text: parts.join('\n\n'),
-    tokensRough: Math.round(parts.join('\n\n').length / 3),
-  };
+  const text = parts.join('\n\n');
+  return { results, text, tokensRough: Math.round(text.length / 3) };
 }
 
 // Готовый текст для вставки в любой чат: инструкция, фрагменты, вопрос.
