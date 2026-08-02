@@ -186,6 +186,12 @@ export class VaultFs {
         const c = await this.write(args.path, args.content);
         return `Создан ${args.path}. Коммит ${c}.`;
       }
+      case 'vault_write': {
+        const text = await this.read(args.path);
+        if (text == null) throw new Error(`Файла ${args.path} нет. Создай через vault_create.`);
+        const c = await this.write(args.path, args.content);
+        return `Перезаписан ${args.path}. Коммит ${c}. Было ${text.length} символов, стало ${args.content.length}.`;
+      }
       default:
         throw new Error(`Неизвестный инструмент: ${name}`);
     }

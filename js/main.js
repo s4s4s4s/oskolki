@@ -34,8 +34,10 @@ function route() {
     renderNote(view, decodeURIComponent(rest));
     setBar('E ПРАВИТЬ РАЗДЕЛ&nbsp;&nbsp;&nbsp;КЛИК ПО [[ССЫЛКЕ]] — ПЕРЕХОД&nbsp;&nbsp;&nbsp;ESC — К ГРАФУ');
   } else if (name === 'cards') {
-    drawStrip('cards'); renderCards(view);
-    setBar('ENTER ОТКРЫТЬ&nbsp;&nbsp;&nbsp;ФИЛЬТРЫ И СОРТИРОВКИ — СВЕРХУ');
+    drawStrip('cards');
+    const tag = new URLSearchParams(h.split('?')[1] || '').get('tag') || '';
+    renderCards(view, tag);
+    setBar('ENTER ОТКРЫТЬ&nbsp;&nbsp;&nbsp;ФИЛЬТРЫ, ТЕГИ И СОРТИРОВКИ — СВЕРХУ');
   } else if (name === 'search') {
     drawStrip('search');
     const q = new URLSearchParams(rest.split('?')[1] || h.split('?')[1] || '').get('q') || '';

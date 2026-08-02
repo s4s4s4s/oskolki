@@ -154,6 +154,9 @@ a.wiki.broken{color:var(--mid);border-bottom-style:dashed}
 .diff .del span{color:#e8a49a;background:rgba(232,100,80,.1)}
 .diff .add span{color:#a9cbb2;background:rgba(127,201,143,.1)}
 .diff .skip span{color:#454c60;font-style:italic;background:rgba(255,255,255,.02)}
+.rail-group{border-bottom:1px solid var(--line-sub)}
+.rail-group:last-child{border-bottom:none}
+.rail-group>.lbl{display:block;padding:7px 12px 2px;font:500 8.5px var(--mono);letter-spacing:.2em;color:var(--dim)}
 .rail-rows>div{display:flex;align-items:center;gap:9px;padding:8px 12px;border-bottom:1px solid var(--line-sub);cursor:pointer}
 .rail-rows>div:last-child{border-bottom:none}
 .rail-rows>div:hover{background:rgba(240,168,96,.05)}

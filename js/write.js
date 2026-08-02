@@ -7,6 +7,8 @@
 import { tools, ToolError, NetError } from './api.js';
 import { DAILY_DIR, DAILY_THOUGHTS } from './config.js';
 import { queuePush, queueAll, queueDrop, queueCount } from './store.js';
+import { addTag, removeTag, addLink, removeLink, setField } from './frontmatter.js';
+import { forgetText } from './map.js';
 
 export const ymd = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 const hm = (d = new Date()) => `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
@@ -118,6 +120,15 @@ function runQueued(it) {
     case 'note': return writeNote(p);
     case 'section': return addSection(p.path, p.heading, p.content);
     case 'patch': return patchSection(p.path, p.heading, p.content, p.operation);
+    case 'field': {
+      const ops = {
+        addTag: t => addTag(t, p.arg), removeTag: t => removeTag(t, p.arg),
+        setField: t => setField(t, p.arg[0], p.arg[1]),
+        addLink: t => addLink(t, p.arg[0], p.arg[1]), removeLink: t => removeLink(t, p.arg[0], p.arg[1]),
+      };
+      if (!ops[p.op]) throw new ToolError(`неизвестная правка: ${p.op}`);
+      return editNoteFile(p.path, ops[p.op], `${p.op}: ${p.path}`);
+    }
     default: throw new ToolError(`неизвестная запись в очереди: ${it.kind}`);
   }
 }
@@ -183,6 +194,54 @@ async function writeNote({ title, zone, template, description = '', body = '' })
 export const createNote = opts =>
   queueable('note', opts, () => writeNote(opts))
     .then(r => ({ path: `${opts.zone ? opts.zone.replace(/\/$/, '') + '/' : ''}${safeFileName(opts.title)}.md`, ...r }));
+
+/* ── свойства заметки: теги, тип, статус, типизированные связи ───────────────
+   Всё это живёт во фронтматтере, то есть выше любого заголовка, — значит
+   правится только перезаписью файла целиком (vault_write). Читаем свежую
+   версию прямо перед записью: между открытием заметки и нажатием на тег могли
+   пройти часы. */
+async function editNoteFile(path, transform, message) {
+  const text = await tools.read(path);
+  const next = transform(text);
+  if (next === text) return { path, answer: 'без изменений', changed: false };
+  const answer = await tools.write(path, next, message);
+  forgetText(path);
+  return { path, answer, changed: true };
+}
+
+export const toggleTag = (path, tag, on) =>
+  queueable('field', { path, op: on ? 'addTag' : 'removeTag', arg: tag }, () =>
+    editNoteFile(path, t => (on ? addTag : removeTag)(t, tag), `${on ? 'тег' : 'снят тег'}: ${tag}`));
+
+export const setNoteField = (path, key, value) =>
+  queueable('field', { path, op: 'setField', arg: [key, value] }, () =>
+    editNoteFile(path, t => setField(t, key, value), `${key}: ${value || '—'}`));
+
+// Связь ставится с одной стороны: обратную сторону приложение и так показывает
+// как «на это ссылаются». Дублировать её в файле — плодить рассинхрон.
+export const linkTo = (path, field, target) =>
+  queueable('field', { path, op: 'addLink', arg: [field, target] }, () =>
+    editNoteFile(path, t => addLink(t, field, target), `связь ${field}: ${target}`));
+
+export const unlinkFrom = (path, field, target) =>
+  queueable('field', { path, op: 'removeLink', arg: [field, target] }, () =>
+    editNoteFile(path, t => removeLink(t, field, target), `снята связь ${field}: ${target}`));
+
+/* Массовое переименование тега по всему вальту. На десяти тысячах заметок
+   теги без этого превращаются в свалку: «ереван», «Ереван» и «переезд/ереван»
+   живут порознь, и ни один фильтр не показывает всё сразу. */
+export async function renameTag(paths, from, to, onStep) {
+  let done = 0, changed = 0;
+  for (const path of paths) {
+    onStep && onStep(++done, paths.length, path);
+    const r = await editNoteFile(path, t => {
+      const stripped = removeTag(t, from);
+      return to ? addTag(stripped, to) : stripped;
+    }, to ? `тег ${from} → ${to}` : `снят тег ${from}`);
+    if (r.changed) changed++;
+  }
+  return { done, changed };
+}
 
 /* ── разделы ──────────────────────────────────────────────────────────────── */
 

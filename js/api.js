@@ -82,6 +82,9 @@ export const tools = {
   patch: (path, heading, content, operation, message) => tool('vault_patch', { path, heading, content, operation, ...(message ? { message } : {}) }),
   append: (path, content) => tool('vault_append', { path, content }),
   create: (path, content) => tool('vault_create', { path, content }),
+  // Перезапись целиком — единственный способ править фронтматтер: он лежит выше
+  // любого заголовка, и vault_patch до него не дотягивается.
+  write: (path, content, message) => tool('vault_write', { path, content, ...(message ? { message } : {}) }),
 };
 export const isConflict = e => e instanceof ToolError && /конфликт/i.test(e.message);
 

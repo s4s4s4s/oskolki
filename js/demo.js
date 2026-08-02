@@ -145,9 +145,16 @@ export const demoTransport = {
         return ok(`закоммичено ${sha()} — ${a.path}`);
       }
       case 'vault_create': {
-        if (FILES[a.path] != null) return err(`уже существует: ${a.path}`);
+        if (FILES[a.path] != null) return err(`${a.path} уже существует. Используй vault_patch или vault_append.`);
         FILES[a.path] = a.content; AGES[a.path] = 0; commit++;
-        return ok(`создано ${sha()} — ${a.path}`);
+        return ok(`Создан ${a.path}. Коммит ${sha()}.`);
+      }
+      case 'vault_write': {
+        const was = FILES[a.path];
+        if (was == null) return err(`Файла ${a.path} нет. Создай через vault_create.`);
+        FILES[a.path] = a.content; AGES[a.path] = 0; commit++;
+        emit({ type: 'push', sha: sha(), message: `write: ${a.path}`, paths: [a.path], indexTouched: false });
+        return ok(`Перезаписан ${a.path}. Коммит ${sha()}. Было ${was.length} символов, стало ${a.content.length}.`);
       }
       default: return err(`неизвестный инструмент ${name}`);
     }

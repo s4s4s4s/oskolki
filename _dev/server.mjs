@@ -222,6 +222,14 @@ async function callTool(name, args = {}) {
       push([args.path], args.message || `create: ${args.path}`);
       return `Создан ${args.path}. Коммит ${c}.`;
     }
+    case 'vault_write': {
+      const f = await readNote(args.path);
+      if (!f) throw new Error(`Файла ${args.path} нет. Создай через vault_create.`);
+      if (conflict.on) { conflict.on = conflict.sticky; throw new Error('Конфликт: файл изменился с момента чтения. Перечитай и повтори.'); }
+      const c = await writeNote(args.path, args.content);
+      push([args.path], args.message || `write: ${args.path}`);
+      return `Перезаписан ${args.path}. Коммит ${c}. Было ${f.text.length} символов, стало ${args.content.length}.`;
+    }
     case 'vault_list': {
       const entries = await listDir(args.path || '');
       return entries.map(e => `${e.type === 'dir' ? '[папка] ' : ''}${e.path}${e.type === 'file' ? ` (${e.size} б)` : ''}`).join('\n');

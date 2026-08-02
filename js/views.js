@@ -7,7 +7,8 @@ import { splitFrontmatter, parseSections, renderMd, fmtBytes, fmtAge, plural } f
 import { GraphView } from './graph.js';
 import { DEFAULT_URL, DAILY_THOUGHTS, MODEL } from './config.js';
 import { buildContext, packForChat, askClaude, getAiSettings, saveAiSettings, forgetKey, mcpConfig, MODES } from './ai.js';
-import { appendThought, dailyPath, createNote, safeFileName, addSection, patchSection, TEMPLATES } from './write.js';
+import { appendThought, dailyPath, createNote, safeFileName, addSection, patchSection, TEMPLATES, toggleTag, linkTo, unlinkFrom, renameTag } from './write.js';
+import { LINK_TYPES, TYPE_OF_FIELD, FIELD_OF_TYPE } from './frontmatter.js';
 import { diffLines, collapseSame } from './diff.js';
 
 export const $ = (sel, el = document) => el.querySelector(sel);
@@ -115,7 +116,8 @@ export function renderGraph(root, state) {
       <div class="blk"><span class="lbl">РАСКЛАДКА</span>
         <button class="radio on" data-layout="zones">▸ КЛАСТЕРЫ / ЗОНЫ</button>
         <button class="radio" data-layout="force">&nbsp;&nbsp;СИЛОВАЯ</button>
-        <button class="radio" data-layout="fresh">&nbsp;&nbsp;СВЕЖЕСТЬ</button></div>
+        <button class="radio" data-layout="fresh">&nbsp;&nbsp;СВЕЖЕСТЬ</button>
+        <button class="radio" data-layout="deps" title="слои по depends_on и blocks: что раньше, что позже, где циклы">&nbsp;&nbsp;ЗАВИСИМОСТИ</button></div>
       <div class="blk"><span class="lbl">КОДИРОВКА</span>
         <div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:6px">
           <button class="chip on" data-color="zone">ЗОНА</button><button class="chip" data-color="fresh">СВЕЖ</button><button class="chip" data-color="deg">СВЯЗ</button></div>
@@ -194,6 +196,14 @@ export function renderGraph(root, state) {
     root.querySelectorAll('[data-layout]').forEach(x => { x.classList.remove('on'); x.innerHTML = '&nbsp;&nbsp;' + x.textContent.trim().replace(/^▸ /, ''); });
     b.classList.add('on'); b.innerHTML = '▸ ' + b.textContent.trim();
     graph.set({ layout: b.dataset.layout });
+    graph.settle(300);
+    if (b.dataset.layout === 'deps') {
+      const vis = graph.nodes.filter(n => !n.dim).length;
+      const cyc = graph._cycles?.size || 0;
+      toast(vis
+        ? `ЗАВИСИМОСТЕЙ: ${vis} ${plural(vis, 'ЗАМЕТКА', 'ЗАМЕТКИ', 'ЗАМЕТОК')}${cyc ? ` · ЦИКЛОВ: ${cyc}` : ''}`
+        : 'ЗАВИСИМОСТЕЙ ПОКА НЕТ — ПОСТАВЬТЕ СВЯЗЬ «ЗАВИСИТ ОТ» НА ЭКРАНЕ ЗАМЕТКИ', vis ? '' : 'warn', 6000);
+    }
   }));
   const wireChips = (attr, prop) => root.querySelectorAll(`[data-${attr}]`).forEach(b => b.addEventListener('click', () => {
     root.querySelectorAll(`[data-${attr}]`).forEach(x => x.classList.remove('on')); b.classList.add('on');
@@ -273,20 +283,152 @@ function drawNote(root, path, raw, note, offline) {
   });
   wireWikiLinks(main);
 
-  const backs = note ? note.in : [];
+  drawRail(root, rail, note, sections, () => renderNote(root, path), path);
+}
+
+/* Правая рельса: свойства, связи по типам, обратные связи, оглавление.
+
+   Раньше здесь были только метаданные и плоский список «на это ссылаются». На
+   двух сотнях заметок этого хватало; на десяти тысячах вопрос не «кто ссылается»,
+   а «чем связаны»: что из чего следует, что чем заблокировано, что устарело. */
+function drawRail(root, rail, note, sections, reload, path) {
+  const backs = note ? note.backlinks || [] : [];
+  const byType = list => {
+    const m = new Map();
+    for (const l of list) { const k = l.type || 'link'; if (!m.has(k)) m.set(k, []); m.get(k).push(l); }
+    return m;
+  };
+  const typeLabel = t => (LINK_TYPES.find(x => TYPE_OF_FIELD[x.key] === t) || {}).label || 'ССЫЛКИ';
+  const out = byType(note?.links || []);
+  const back = byType(backs);
+
+  const linkRows = (items, dir) => items.map(l => {
+    const other = dir === 'out' ? l.to : l.from;
+    return `<div data-p="${escA(other.path)}">${zoneDot(other.zoneRef)}<span class="nm">${other.title}</span>${
+      dir === 'out' && l.type !== 'link' ? `<span class="zn" data-unlink="${escA(l.type)}|${escA(other.title)}" title="убрать связь">✕</span>` : `<span class="zn">${zn(other)}</span>`}</div>`;
+  }).join('');
+
   rail.innerHTML = `
-    <div class="panel"><div class="hd">МЕТАДАННЫЕ</div><div class="bd" style="padding:9px 12px;font-size:10px;color:var(--mid);line-height:2">
-      ПРАВКА&nbsp;&nbsp;&nbsp;<b style="color:var(--text);font-weight:400">${fmtAge(note?.meta.h).toUpperCase()}</b><br>
-      КАСАНИЕ&nbsp;<b style="color:var(--text);font-weight:400">${fmtAge(note?.meta.u).toUpperCase()}</b> <span style="color:#454c60">(автосинк)</span><br>
-      РАЗМЕР&nbsp;&nbsp;&nbsp;<b style="color:var(--text);font-weight:400">${fmtBytes(note?.meta.b || 0)}</b> · КОММИТОВ <b style="color:var(--text);font-weight:400">${note?.meta.c || 0}</b><br>
-      СВЯЗИ&nbsp;&nbsp;&nbsp;&nbsp;<b style="color:var(--text);font-weight:400">${note?.out.length || 0} →</b> и <b style="color:var(--text);font-weight:400">← ${backs.length}</b></div></div>
-    <div class="panel"><div class="hd">ОБРАТНЫЕ ССЫЛКИ · ${backs.length}</div><div class="rail-rows">${backs.length ? backs.map(b => `<div data-p="${escA(b.path)}">${zoneDot(b.zoneRef)}<span class="nm">${b.title}</span><span class="zn">${zn(b)}</span></div>`).join('') : '<div style="cursor:default;color:var(--dim);font-size:10px">пока никто не ссылается</div>'}</div></div>
-    <div class="panel"><div class="hd">ОГЛАВЛЕНИЕ</div><div class="toc">${sections.filter(s => s.heading).map((s, i) => `<div data-h="h-${sections.indexOf(s)}">${'#'.repeat(s.level)} ${s.heading}</div>`).join('') || '<div style="cursor:default">без заголовков</div>'}</div></div>`;
-  rail.querySelectorAll('[data-p]').forEach(r => r.addEventListener('click', () => { location.hash = `#/note/${encodeURIComponent(r.dataset.p)}`; }));
+    <div class="panel"><div class="hd">СВОЙСТВА</div><div class="bd" style="padding:10px 12px">
+      <div style="font-size:10px;color:var(--mid);line-height:2">
+        ТИП&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<b style="color:var(--text);font-weight:400">${(note?.type || '—').toUpperCase()}</b>
+        · СТАТУС <b style="color:var(--text);font-weight:400">${(note?.status || '—').toUpperCase()}</b><br>
+        ПРАВКА&nbsp;<b style="color:var(--text);font-weight:400">${fmtAge(note?.meta.h).toUpperCase()}</b>
+        · ${fmtBytes(note?.meta.b || 0)} · ${note?.meta.c || 0} ${plural(note?.meta.c || 0, 'КОММИТ', 'КОММИТА', 'КОММИТОВ')}
+      </div>
+      <div style="display:flex;gap:5px;flex-wrap:wrap;margin-top:10px" id="n-tags">
+        ${(note?.tags || []).map(t => `<button class="chip on" data-tag="${escA(t)}" title="фильтр по тегу · Alt+клик снять">#${t}</button>`).join('')}
+        <button class="chip" data-addtag title="добавить тег">＋ ТЕГ</button>
+      </div>
+    </div></div>
+
+    <div class="panel"><div class="hd">СВЯЗИ · ${note?.links.length || 0}</div>
+      ${[...out].map(([type, items]) => `<div class="rail-group"><span class="lbl">${typeLabel(type)}</span><div class="rail-rows">${linkRows(items, 'out')}</div></div>`).join('')
+        || '<div class="rail-rows"><div style="cursor:default;color:var(--dim);font-size:10px">ни на что не ссылается</div></div>'}
+      <div style="padding:8px 12px"><button class="btn-line" data-addlink style="width:100%">＋ СВЯЗЬ</button></div>
+    </div>
+
+    <div class="panel"><div class="hd">НА ЭТО ССЫЛАЮТСЯ · ${backs.length}</div>
+      ${[...back].map(([type, items]) => `<div class="rail-group"><span class="lbl">${typeLabel(type)}</span><div class="rail-rows">${linkRows(items, 'in')}</div></div>`).join('')
+        || '<div class="rail-rows"><div style="cursor:default;color:var(--dim);font-size:10px">пока никто не ссылается</div></div>'}
+    </div>
+
+    ${note?.broken?.length ? `<div class="panel"><div class="hd" style="color:var(--red)">БИТЫЕ ССЫЛКИ · ${note.broken.length}</div><div class="rail-rows">${
+      note.broken.map(b => `<div data-broken="${escA(b)}" title="создать эту заметку"><span class="nm">${escA(b)}</span><span class="zn">СОЗДАТЬ</span></div>`).join('')}</div></div>` : ''}
+
+    <div class="panel"><div class="hd">ОГЛАВЛЕНИЕ</div><div class="toc">${sections.filter(s => s.heading).map(s => `<div data-h="h-${sections.indexOf(s)}">${'#'.repeat(s.level)} ${s.heading}</div>`).join('') || '<div style="cursor:default">без заголовков</div>'}</div></div>`;
+
+  rail.querySelectorAll('[data-p]').forEach(r => r.addEventListener('click', e => {
+    if (e.target.dataset.unlink) return;
+    location.hash = `#/note/${encodeURIComponent(r.dataset.p)}`;
+  }));
+  rail.querySelectorAll('[data-unlink]').forEach(x => x.addEventListener('click', async e => {
+    e.stopPropagation();
+    const [type, title] = x.dataset.unlink.split('|');
+    try { await unlinkFrom(path, FIELD_OF_TYPE[type] || type, title); toast('СВЯЗЬ УБРАНА'); reload(); }
+    catch (err) { toast(`НЕ ВЫШЛО: ${err.message}`, 'err'); }
+  }));
+  rail.querySelectorAll('[data-tag]').forEach(b => b.addEventListener('click', async e => {
+    const tag = b.dataset.tag;
+    if (e.altKey) {
+      try { await toggleTag(path, tag, false); toast(`СНЯТ ТЕГ #${tag}`); reload(); }
+      catch (err) { toast(`НЕ ВЫШЛО: ${err.message}`, 'err'); }
+      return;
+    }
+    location.hash = `#/cards?tag=${encodeURIComponent(tag)}`;
+  }));
+  $('[data-addtag]', rail)?.addEventListener('click', () => askTag(path, reload));
+  $('[data-addlink]', rail)?.addEventListener('click', () => askLink(path, reload));
+  rail.querySelectorAll('[data-broken]').forEach(b => b.addEventListener('click', () => {
+    toast(`СОЗДАЙТЕ ЗАМЕТКУ «${b.dataset.broken}» — [C]`, 'warn', 5000);
+  }));
   rail.querySelectorAll('[data-h]').forEach(r => r.addEventListener('click', () => {
     const t = document.getElementById(r.dataset.h);
     if (t) $('.note-wrap', root).scrollTo({ top: t.getBoundingClientRect().top + $('.note-wrap', root).scrollTop - 80, behavior: 'smooth' });
   }));
+}
+
+// Ввод тега с подсказкой по уже существующим: главный способ не расплодить
+// «ереван», «Ереван» и «ереван/переезд» как три разных тега.
+function askTag(path, reload) {
+  const wrap = $('#modal');
+  const all = [...corpus.tagCounts].slice(0, 40);
+  wrap.innerHTML = `<div class="cap"><div class="hd">ДОБАВИТЬ ТЕГ<span>ESC — ЗАКРЫТЬ</span></div>
+    <div class="row"><label><span class="lbl">ТЕГ (МОЖНО ИЕРАРХИЮ ЧЕРЕЗ /)</span><input id="tg-in" placeholder="проект/ереван" spellcheck="false" list="tg-list">
+      <datalist id="tg-list">${all.map(([t]) => `<option value="${escA(t)}">`).join('')}</datalist></label></div>
+    <div class="hint-row">${all.length ? 'ЧАСТЫЕ: ' + all.slice(0, 10).map(([t, n]) => `<span class="chip" data-pick="${escA(t)}" style="cursor:pointer">#${t} ${n}</span>`).join(' ') : 'в вальте пока нет тегов'}</div>
+    <div class="ft"><button class="btn-amber" style="margin:0" id="tg-ok">ДОБАВИТЬ [ENTER]</button><button class="btn-line" id="tg-no">ОТМЕНА</button></div></div>`;
+  wrap.classList.add('open');
+  const close = () => { wrap.classList.remove('open'); document.activeElement?.blur(); };
+  const input = $('#tg-in', wrap);
+  setTimeout(() => input.focus(), 30);
+  const save = async () => {
+    const tag = input.value.trim();
+    if (!tag) return close();
+    close();
+    try { await toggleTag(path, tag, true); toast(`ТЕГ #${tag} ДОБАВЛЕН`); reload(); }
+    catch (e) { toast(`НЕ ВЫШЛО: ${e.message}`, 'err'); }
+  };
+  wrap.querySelectorAll('[data-pick]').forEach(c => c.addEventListener('click', () => { input.value = c.dataset.pick; save(); }));
+  $('#tg-ok', wrap).addEventListener('click', save);
+  $('#tg-no', wrap).addEventListener('click', close);
+  wrap.addEventListener('keydown', e => { if (e.key === 'Enter') save(); if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  wrap.addEventListener('click', e => { if (e.target === wrap) close(); });
+}
+
+// Типизированная связь: сначала «чем связаны», потом «с чем». Порядок важен —
+// тип определяет смысл, а обычную ссылку и так можно поставить прямо в тексте.
+function askLink(path, reload) {
+  const wrap = $('#modal');
+  wrap.innerHTML = `<div class="cap"><div class="hd">СВЯЗАТЬ ЗАМЕТКУ<span>ESC — ЗАКРЫТЬ</span></div>
+    <div class="row"><label><span class="lbl">ЧЕМ СВЯЗАНЫ</span><select id="lk-type">
+      ${LINK_TYPES.map(t => `<option value="${t.key}">${t.label} — ${t.hint}</option>`).join('')}</select></label></div>
+    <div class="row"><label><span class="lbl">С ЧЕМ</span><input id="lk-target" placeholder="начните вводить название…" spellcheck="false" autocomplete="off"></label></div>
+    <div class="ask-ctx" id="lk-found" style="max-height:220px;overflow:auto;margin:0 14px"></div>
+    <div class="ft"><button class="btn-line" id="lk-no">ОТМЕНА</button><span class="note">связь пишется во фронтматтер — Obsidian и Dataview её видят</span></div></div>`;
+  wrap.classList.add('open');
+  const close = () => { wrap.classList.remove('open'); document.activeElement?.blur(); };
+  const input = $('#lk-target', wrap), found = $('#lk-found', wrap);
+  setTimeout(() => input.focus(), 30);
+  const draw = () => {
+    const q = input.value.trim().toLowerCase();
+    const list = corpus.notes
+      .filter(n => n.path !== path && (!q || n.title.toLowerCase().includes(q) || n.path.toLowerCase().includes(q)))
+      .slice(0, 12);
+    found.innerHTML = list.map(n => `<div class="result" data-t="${escA(n.title)}"><div class="path">${zoneDot(n.zoneRef)}<span style="color:var(--text)">${n.title}</span><span style="color:#454c60;margin-left:auto">${zn(n)}</span></div></div>`).join('')
+      || '<div style="color:var(--dim);font-size:10px;padding:8px 0">ничего не нашлось</div>';
+    found.querySelectorAll('[data-t]').forEach(r => r.addEventListener('click', async () => {
+      const field = $('#lk-type', wrap).value;
+      close();
+      try { await linkTo(path, field, r.dataset.t); toast(`СВЯЗЬ ПОСТАВЛЕНА: ${field.toUpperCase()} → ${r.dataset.t.toUpperCase()}`); reload(); }
+      catch (e) { toast(`НЕ ВЫШЛО: ${e.message}`, 'err'); }
+    }));
+  };
+  input.addEventListener('input', draw);
+  draw();
+  $('#lk-no', wrap).addEventListener('click', close);
+  wrap.addEventListener('keydown', e => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  wrap.addEventListener('click', e => { if (e.target === wrap) close(); });
 }
 
 // Дифф в конфликте: показываем, чем серверная версия раздела отличается от той,
@@ -416,8 +558,9 @@ function newSection(root, path, reload) {
 }
 
 /* ── картотека ───────────────────────────────────────────── */
-const cardState = { sort: 'fresh', view: 'table', q: '' };
-export function renderCards(root) {
+const cardState = { sort: 'fresh', view: 'table', q: '', tag: '' };
+export function renderCards(root, tag) {
+  cardState.tag = tag || '';
   root.innerHTML = `<div class="cards-wrap">
     <div class="toolbar">
       <span class="lbl">СОРТ</span>
@@ -428,6 +571,8 @@ export function renderCards(root) {
       <span class="seg"><button class="chip" data-v="table">ТАБЛИЦА</button><button class="chip" data-v="grid">СЕТКА</button></span>
       <span style="display:flex;gap:5px;flex-wrap:wrap" id="k-zones"></span>
       <span class="sp"></span>
+      ${cardState.tag ? `<button class="chip on" id="k-tag" title="снять фильтр по тегу">#${escA(cardState.tag)} ✕</button>` : ''}
+      <button class="chip" id="k-tags-all" title="все теги вальта">ТЕГИ ${corpus.tagCounts.size}</button>
       <input id="k-q" placeholder="фильтр…" spellcheck="false" value="${escA(cardState.q)}">
     </div>
     <div class="cards-body" id="k-body"></div></div>`;
@@ -443,7 +588,10 @@ export function renderCards(root) {
   };
   function rows() {
     const q = cardState.q.toLowerCase();
+    // Тег включает и вложенные: фильтр «проект» показывает «проект/ереван».
+    const tag = cardState.tag;
     let list = corpus.notes.filter(n => isVisible(n)
+      && (!tag || (n.tags || []).some(t => t === tag || t.startsWith(tag + '/')))
       && (!q || n.title.toLowerCase().includes(q) || n.path.toLowerCase().includes(q) || (n.tags || []).some(t => t.includes(q))));
     const by = {
       fresh: (a, b) => new Date(b.meta.h || 0) - new Date(a.meta.h || 0),
@@ -504,8 +652,74 @@ export function renderCards(root) {
   }
   root.querySelectorAll('[data-s]').forEach(b => b.addEventListener('click', () => { cardState.sort = b.dataset.s; draw(); }));
   root.querySelectorAll('[data-v]').forEach(b => b.addEventListener('click', () => { cardState.view = b.dataset.v; draw(); }));
+  $('#k-tag', root)?.addEventListener('click', () => { location.hash = '#/cards'; });
+  $('#k-tags-all', root)?.addEventListener('click', () => showAllTags());
   $('#k-q', root).addEventListener('input', e => { cardState.q = e.target.value; draw(); });
   drawZones(); draw();
+}
+
+/* Все теги вальта разом: с чего начинается наведение порядка. Отсюда же
+   переименование и слияние — на десяти тысячах заметок теги без этого
+   расползаются на «ереван», «Ереван» и «переезд/ереван», и ни один фильтр не
+   показывает всё сразу. */
+function showAllTags() {
+  const wrap = $('#modal');
+  const all = [...corpus.tagCounts];
+  const draw = () => {
+    wrap.innerHTML = `<div class="cap" style="width:680px"><div class="hd">ТЕГИ ВАЛЬТА · ${all.length}<span>ESC — ЗАКРЫТЬ</span></div>
+      <div class="hint-row">клик — отфильтровать картотеку · ✎ — переименовать или слить во всём вальте</div>
+      <div class="ask-ctx" style="max-height:52vh;overflow:auto;margin:10px 14px">
+        ${all.length ? all.map(([t, n]) => `<div class="trow" style="grid-template-columns:1fr 70px 40px">
+          <span class="nm" data-pick="${escA(t)}" style="cursor:pointer">#${escA(t)}</span>
+          <span>${n} ${plural(n, 'ЗАМЕТКА', 'ЗАМЕТКИ', 'ЗАМЕТОК')}</span>
+          <span data-ren="${escA(t)}" style="cursor:pointer;color:var(--amber)" title="переименовать по всему вальту">✎</span>
+        </div>`).join('') : '<div style="color:var(--dim);font-size:11px;padding:10px 0">тегов пока нет — поставьте первый на экране заметки</div>'}
+      </div>
+      <div class="ft"><button class="btn-line" id="tl-close">ЗАКРЫТЬ</button>
+        <span class="note">теги живут во фронтматтере и видны Obsidian</span></div></div>`;
+    wrap.querySelectorAll('[data-pick]').forEach(x => x.addEventListener('click', () => {
+      close(); location.hash = `#/cards?tag=${encodeURIComponent(x.dataset.pick)}`;
+    }));
+    wrap.querySelectorAll('[data-ren]').forEach(x => x.addEventListener('click', () => renameTagFlow(x.dataset.ren, close)));
+    $('#tl-close', wrap).addEventListener('click', close);
+  };
+  const close = () => { wrap.classList.remove('open'); document.activeElement?.blur(); };
+  draw();
+  wrap.classList.add('open');
+  wrap.addEventListener('keydown', e => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  wrap.addEventListener('click', e => { if (e.target === wrap) close(); });
+}
+
+// Переименование идёт по всем заметкам с этим тегом: это единственная операция,
+// которая правит десятки файлов разом, поэтому показывается счёт и предупреждение.
+function renameTagFlow(tag, closeParent) {
+  const notes = corpus.notes.filter(n => (n.tags || []).includes(tag));
+  const wrap = $('#modal');
+  wrap.innerHTML = `<div class="cap"><div class="hd">ПЕРЕИМЕНОВАТЬ ТЕГ #${escA(tag)}<span>ESC — ЗАКРЫТЬ</span></div>
+    <div class="row"><label><span class="lbl">НОВОЕ ИМЯ (ПУСТО — ПРОСТО СНЯТЬ ТЕГ)</span>
+      <input id="rt-in" value="${escA(tag)}" spellcheck="false"></label></div>
+    <div class="hint-row">затронет <b style="color:var(--amber-l)">${notes.length}</b> ${plural(notes.length, 'заметку', 'заметки', 'заметок')} · если такой тег уже есть, теги сольются</div>
+    <div class="search-stats" id="rt-progress" style="padding:0 14px"></div>
+    <div class="ft"><button class="btn-amber" style="margin:0" id="rt-ok">ПЕРЕИМЕНОВАТЬ</button><button class="btn-line" id="rt-no">ОТМЕНА</button></div></div>`;
+  const close = () => { wrap.classList.remove('open'); document.activeElement?.blur(); };
+  const input = $('#rt-in', wrap), progress = $('#rt-progress', wrap);
+  setTimeout(() => input.focus(), 30);
+  $('#rt-no', wrap).addEventListener('click', close);
+  $('#rt-ok', wrap).addEventListener('click', async () => {
+    const to = input.value.trim();
+    if (to === tag) return close();
+    $('#rt-ok', wrap).textContent = 'ПРАВЛЮ…';
+    try {
+      const r = await renameTag(notes.map(n => n.path), tag, to,
+        (done, total, path) => { progress.innerHTML = `<span>${done} / ${total}</span><span>${path}</span>`; });
+      close();
+      toast(`ТЕГ ${to ? `#${tag} → #${to}` : `#${tag} СНЯТ`} · ЗАМЕТОК ИЗМЕНЕНО: ${r.changed}`, '', 6000);
+    } catch (e) {
+      $('#rt-ok', wrap).textContent = 'ПЕРЕИМЕНОВАТЬ';
+      toast(`НЕ ВЫШЛО: ${e.message}`, 'err');
+    }
+  });
+  wrap.addEventListener('keydown', e => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
 }
 
 /* ── поиск ───────────────────────────────────────────────────────────────────

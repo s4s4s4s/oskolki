@@ -26,9 +26,16 @@ export class GraphView {
   setModel(model) {
     this.model = model;
     const old = new Map((this.nodes || []).map(n => [n.note.path, n]));
+    // Случайный старт означал, что первые секунды граф разлетается по экрану у
+    // человека на глазах. Ставим узлы сразу рядом со своим созвездием, а разброс
+    // берём из хеша пути: он одинаков от запуска к запуску, поэтому карта каждый
+    // раз складывается одинаково и её можно запомнить глазами.
     this.nodes = model.notes.map(note => {
       const prev = old.get(note.path);
-      return { note, x: prev ? prev.x : (Math.random() - .5) * 800, y: prev ? prev.y : (Math.random() - .5) * 800, vx: 0, vy: 0, r: 5, alpha: 1 };
+      if (prev) return { note, x: prev.x, y: prev.y, vx: 0, vy: 0, r: 5, alpha: 1 };
+      const a = hash(note.path) * Math.PI * 2;
+      const rr = 40 + hash(note.path + '·') * 90;
+      return { note, x: Math.cos(a) * rr, y: Math.sin(a) * rr, vx: 0, vy: 0, r: 5, alpha: 1 };
     });
     const idx = new Map(this.nodes.map(n => [n.note, n]));
     this.links = model.edges.map(e => ({ a: idx.get(e.a), b: idx.get(e.b) })).filter(l => l.a && l.b);
@@ -54,10 +61,65 @@ export class GraphView {
     return map;
   }
 
+  /* Раскладка зависимостей: не облако, а слои.
+
+     `depends_on` и `blocks` — это направленное отношение, и смотреть на него
+     силовым графом бессмысленно: важно не «кто рядом», а «что раньше». Каждый
+     узел встаёт в слой по длине самой длинной цепочки зависимостей до него,
+     слои идут слева направо — читается как порядок работ.
+
+     Циклы (A зависит от B, B зависит от A) топологический порядок не имеет:
+     они не получают слоя и собираются справа отдельной группой. На десяти
+     тысячах заметок циклы появятся обязательно, и молча прятать их нельзя —
+     это не косметика, а сломанное планирование. */
+  _dependencyLayers() {
+    const idx = new Map(this.nodes.map((n, i) => [n.note, i]));
+    const deps = this.nodes.map(() => []);        // узел → от кого зависит
+    for (const e of this.model.edges) {
+      const a = idx.get(e.a), b = idx.get(e.b);
+      if (a === undefined || b === undefined) continue;
+      if (e.type === 'depends') deps[a].push(b);        // a зависит от b
+      else if (e.type === 'blocks') deps[b].push(a);    // a блокирует b ⇒ b зависит от a
+    }
+    const level = new Array(this.nodes.length).fill(-1);
+    const state = new Array(this.nodes.length).fill(0);  // 0 не тронут, 1 в обходе, 2 готов
+    const inCycle = new Set();
+    const visit = i => {
+      if (state[i] === 2) return level[i];
+      if (state[i] === 1) { inCycle.add(i); return 0; }   // вернулись в себя — цикл
+      state[i] = 1;
+      let lv = 0;
+      for (const d of deps[i]) lv = Math.max(lv, visit(d) + 1);
+      state[i] = 2; level[i] = lv;
+      return lv;
+    };
+    for (let i = 0; i < this.nodes.length; i++) visit(i);
+    const connected = new Set();
+    deps.forEach((list, i) => { if (list.length) { connected.add(i); list.forEach(d => connected.add(d)); } });
+    return { level, inCycle, connected };
+  }
+
   // ── раскладки: каждой ноде цель-якорь ────────────────────
   _applyAnchors() {
     const N = this.nodes; if (!N.length) return;
     const sectors = this._sectors();
+    if (this.layout === 'deps') {
+      const { level, inCycle, connected } = this._dependencyLayers();
+      this._cycles = inCycle;
+      const perLevel = new Map();
+      N.forEach((n, i) => {
+        if (!connected.has(i)) { n.ax = 0; n.ay = 0; n.pull = 0; n.offDeps = true; return; }
+        n.offDeps = false;
+        const lv = inCycle.has(i) ? -1 : level[i];
+        const row = perLevel.get(lv) || 0;
+        perLevel.set(lv, row + 1);
+        n.ax = lv === -1 ? 520 : -420 + lv * 190;      // циклы — отдельной колонкой справа
+        n.ay = -240 + row * 46;
+        n.pull = .12;
+      });
+      return;
+    }
+    for (const n of N) n.offDeps = false;
     if (this.layout === 'zones') {
       const R = 150 + N.length * 1.35;
       for (const { angle, zone } of sectors.values()) {
@@ -101,7 +163,11 @@ export class GraphView {
       const on = isVisible(n.note);
       const txtOk = !q || n.note.title.toLowerCase().includes(q) || n.note.path.toLowerCase().includes(q)
         || (n.note.tags || []).some(t => t.includes(q));
-      n.dim = !(on && txtOk);
+      const tagOk = !this.tagFilter || (n.note.tags || []).some(t => t === this.tagFilter || t.startsWith(this.tagFilter + '/'));
+      // В раскладке зависимостей всё, что ни от чего не зависит, только мешает:
+      // это сотни заметок вокруг десятка настоящих цепочек.
+      const depsOk = this.layout !== 'deps' || !n.offDeps;
+      n.dim = !(on && txtOk && tagOk && depsOk);
     }
   }
 
@@ -181,11 +247,33 @@ export class GraphView {
       n.vx += (n.ax - n.x) * n.pull * heat * 3; n.vy += (n.ay - n.y) * n.pull * heat * 3;
       n.vx *= .86; n.vy *= .86; n.x += n.vx; n.y += n.vy;
     }
-    if (!this._userMoved) this.fit();
+    // Автокадрирование каждый кадр заставляло картинку дышать: узлы ещё
+    // разъезжаются, а камера уже подгоняет масштаб под них — и всё дрожит.
+    // Теперь кадрируем плавно и только пока человек не взялся за камеру сам.
+    if (!this._userMoved) this.fit({ smooth: true });
+  }
+
+  /* Досчитать раскладку до показа. Смотреть, как граф разлетается из точки, —
+     не зрелище, а три секунды ожидания: узлы прыгают, подписи скачут, кликнуть
+     не во что. Дешевле прокрутить физику молча (бюджет по времени, а не по
+     числу шагов — на слабой машине лучше показать чуть менее устоявшуюся
+     картинку, чем задержать окно). */
+  settle(budgetMs = 400) {
+    const until = performance.now() + budgetMs;
+    this.heat(1);
+    let steps = 0;
+    while (performance.now() < until && this._heat > .02) { this._tick(); steps++; }
+    // Гасим не только «нагрев», но и накопленные скорости: иначе первый же
+    // видимый кадр начинается с рывка — узлы летят с той скоростью, которую
+    // набрали, пока их никто не видел.
+    for (const n of this.nodes) { n.vx = 0; n.vy = 0; }
+    this._heat = Math.min(this._heat, .05);
+    this.fit();
+    return steps;
   }
 
   // вписать граф в окно (пока пользователь сам не двигал камеру)
-  fit(margin = 70) {
+  fit({ margin = 70, smooth = false } = {}) {
     const vis = this.nodes.filter(n => !n.dim);
     if (!vis.length || !this._dpr) return;
     let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
@@ -193,7 +281,12 @@ export class GraphView {
     const w = this.canvas.width / this._dpr, h = this.canvas.height / this._dpr;
     const k2 = Math.max(.25, Math.min(1, Math.min((w - margin * 2) / (x1 - x0 + 1), (h - margin * 2) / (y1 - y0 + 1))));
     this._fitK = k2;
-    this.cam.k = k2; this.cam.x = -(x0 + x1) / 2 * k2; this.cam.y = -(y0 + y1) / 2 * k2;
+    const tx = -(x0 + x1) / 2 * k2, ty = -(y0 + y1) / 2 * k2;
+    if (!smooth) { this.cam.k = k2; this.cam.x = tx; this.cam.y = ty; return; }
+    const t = 0.12;   // мягкое догоняние: камера идёт за раскладкой, а не дёргается вместе с ней
+    this.cam.k += (k2 - this.cam.k) * t;
+    this.cam.x += (tx - this.cam.x) * t;
+    this.cam.y += (ty - this.cam.y) * t;
   }
 
   // ── рендер ───────────────────────────────────────────────
@@ -475,7 +568,8 @@ export class GraphView {
 
   start() {
     if (this.running) return;
-    this.running = true; this.resize(); this.heat(1);
+    this.running = true; this.resize();
+    this.settle();          // показываем уже сложившуюся карту, а не разлёт из точки
     const loop = () => { if (!this.running) return; this._tick(); this._render(); this._raf = requestAnimationFrame(loop); };
     loop();
   }
