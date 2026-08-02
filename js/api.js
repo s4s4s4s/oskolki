@@ -89,6 +89,11 @@ export const tools = {
   // же контракт поверх локального git.
   history: (path, limit) => tool('vault_history', limit ? { path, limit } : { path }),
   at: (path, sha) => tool('vault_at', { path, sha }),
+  // Архив с вложениями: файл кладётся base64, читается base64, а человеку
+  // отдаётся подписанной ссылкой — содержимое таскать незачем.
+  upload: (path, base64, message) => tool('vault_upload', { path, base64, ...(message ? { message } : {}) }),
+  binary: path => tool('vault_binary', { path }),
+  fileLink: (path, hours) => tool('vault_file_link', hours ? { path, hours } : { path }),
 };
 export const isConflict = e => e instanceof ToolError && /конфликт/i.test(e.message);
 

@@ -311,3 +311,8 @@ html.native .strip .info{-webkit-app-region:no-drag}
 .ent-claims .zn{font:400 9px var(--mono);color:var(--dim);letter-spacing:.1em;white-space:nowrap}
 .ent-near{padding:7px 12px;font:400 9.5px var(--mono);letter-spacing:.1em;color:var(--dim)}
 .ent-near span{color:var(--amber-l);cursor:pointer;margin-right:2px}
+
+/* ── архив ── */
+.ar-drop{border:1px dashed var(--line);padding:22px 14px;text-align:center;font-size:11px;color:var(--dim);margin-top:14px}
+.ar-drop b{color:var(--mid);font-weight:400}
+.ar-drop.over{border-color:var(--amber);background:rgba(240,168,96,.08);color:var(--amber-l)}

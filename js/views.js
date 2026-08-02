@@ -1534,6 +1534,7 @@ export function initPalette() {
     { label: 'Здоровье вальта', hint: 'сироты, битые, застой', run: () => { location.hash = '#/health'; } },
     { label: 'Разбор', hint: 'неразмеченное по одной', run: () => { location.hash = '#/triage'; } },
     { label: 'Лента', hint: 'по времени правок', run: () => { location.hash = '#/time'; } },
+    { label: 'Архив', hint: 'улики и вложения, загрузка файлов', run: () => { location.hash = '#/archive'; } },
     { label: 'Люди', hint: 'кто и где упоминается', run: () => { location.hash = '#/people'; } },
     { label: 'Сводка за неделю', hint: 'что было и что подвисло', run: () => aiDigest(7) },
     { label: 'Сводка за месяц', hint: 'то же, шире', run: () => aiDigest(30) },
@@ -1840,6 +1841,108 @@ export function renderPeople(root) {
   };
   $('#pp-q', root).addEventListener('input', e => draw(e.target.value.trim().toLowerCase()));
   draw();
+}
+
+/* ── архив ───────────────────────────────────────────────────────────────────
+   Улики и вложения. Это не карта знания, а её доказательная база: сюда ходят,
+   когда надо проверить утверждение по первоисточнику или достать скан.
+
+   Файлы кладутся перетаскиванием и отдаются подписанной ссылкой, которая живёт
+   сутки. Содержимое в приложение не тянется: полтора мегабайта PDF ради строчки
+   в списке — плохой обмен, а ссылка открывается тем, что для этого и сделано, —
+   браузером. */
+const ARCHIVE_DIR = 'archive/файлы';
+
+export async function renderArchive(root) {
+  const улики = corpus.notes
+    .filter(n => n.klass === 'улика')
+    .sort((a, b) => new Date(b.meta.h || 0) - new Date(a.meta.h || 0));
+  const разобрано = new Set();
+  for (const n of corpus.notes) {
+    if (n.klass !== 'утверждение' && n.klass !== 'событие') continue;
+    for (const l of n.links || []) if (l.type === 'source') разобрано.add(l.to);
+  }
+
+  root.innerHTML = `<div class="cards-wrap">
+    <div class="toolbar"><span class="lbl">АРХИВ</span>
+      <span style="font-size:10px;color:var(--mid)">${улики.length} ${plural(улики.length, 'улика', 'улики', 'улик')} · разобрано ${разобрано.size} · вложения в ${ARCHIVE_DIR}</span>
+      <span class="sp"></span>
+      <button class="chip" id="ar-add">＋ ФАЙЛ</button>
+      <input id="ar-file" type="file" hidden multiple>
+      <input id="ar-q" placeholder="фильтр…" spellcheck="false"></div>
+    <div class="cards-body" id="ar-body"><div class="ar-drop" id="ar-drop">
+      перетащи сюда PDF, скан или картинку — уйдёт в <b>${ARCHIVE_DIR}</b></div>
+      <div id="ar-files"></div><div id="ar-list"></div></div></div>`;
+
+  const list = $('#ar-list', root);
+  const draw = (q = '') => {
+    const выборка = улики.filter(n => !q || n.title.toLowerCase().includes(q) || n.path.toLowerCase().includes(q));
+    list.innerHTML = `<div class="tl-hd" style="margin-top:16px">УЛИКИ<span>${выборка.length}</span></div>
+      <div class="rail-rows">${выборка.slice(0, 300).map(n => `<div data-p="${escA(n.path)}">
+        ${zoneDot(n.zoneRef)}<span class="nm">${n.title}</span>
+        <span class="zn">${разобрано.has(n) ? 'разобрано' : '—'} · ${fmtBytes(n.meta.b || 0)} · ${fmtAge(n.meta.h)}</span></div>`).join('')}</div>`;
+    list.querySelectorAll('[data-p]').forEach(r => r.addEventListener('click', () => {
+      location.hash = `#/note/${encodeURIComponent(r.dataset.p)}`;
+    }));
+  };
+  $('#ar-q', root).addEventListener('input', e => draw(e.target.value.trim().toLowerCase()));
+  draw();
+
+  // Список уже лежащих вложений: отдельным вызовом, потому что в карту они не
+  // попадают — это не заметки, и индексировать их нечем.
+  const files = $('#ar-files', root);
+  try {
+    const текст = await tools.list(ARCHIVE_DIR);
+    const строки = текст.split('\n').filter(l => l && !/^\[папка\]/.test(l));
+    files.innerHTML = строки.length
+      ? `<div class="tl-hd" style="margin-top:14px">ВЛОЖЕНИЯ<span>${строки.length}</span></div>
+         <div class="rail-rows">${строки.map(l => {
+           const p = l.replace(/\s*\(\d+ б\)$/, '');
+           const kb = (l.match(/\((\d+) б\)/) || [])[1];
+           return `<div data-f="${escA(p)}"><span class="nm">${escA(p.split('/').pop())}</span>
+             <span class="zn">${kb ? fmtBytes(+kb) : ''} · ССЫЛКА</span></div>`;
+         }).join('')}</div>`
+      : '';
+    files.querySelectorAll('[data-f]').forEach(r => r.addEventListener('click', () => shareFile(r.dataset.f)));
+  } catch { files.innerHTML = ''; }
+
+  const upload = async fileList => {
+    for (const file of fileList) {
+      if (file.size > 20 * 1024 * 1024) { toast(`${file.name}: больше 20 МБ — GitHub такой не примет`, 'err', 6000); continue; }
+      toast(`ЗАГРУЖАЮ ${file.name.toUpperCase()}…`);
+      try {
+        const b64 = await new Promise((ok, no) => {
+          const fr = new FileReader();
+          fr.onload = () => ok(String(fr.result).split(',')[1]);
+          fr.onerror = () => no(new Error('файл не прочитался'));
+          fr.readAsDataURL(file);
+        });
+        const res = await tools.upload(`${ARCHIVE_DIR}/${safeFileName(file.name)}`, b64, `архив: ${file.name}`);
+        toast(res.toUpperCase().slice(0, 80));
+      } catch (e) { toast(`${file.name}: ${e.message}`, 'err', 7000); }
+    }
+    renderArchive(root);
+  };
+
+  const drop = $('#ar-drop', root);
+  ['dragenter', 'dragover'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('over'); }));
+  ['dragleave', 'drop'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('over'); }));
+  drop.addEventListener('drop', e => upload(e.dataTransfer.files));
+  $('#ar-add', root).addEventListener('click', () => $('#ar-file', root).click());
+  $('#ar-file', root).addEventListener('change', e => upload(e.target.files));
+}
+
+// Ссылка на файл: одна кнопка, потому что именно это просят — «скинь мне тот
+// PDF». Копируется в буфер и открывается; живёт сутки и потом протухает сама.
+async function shareFile(path) {
+  toast('ГОТОВЛЮ ССЫЛКУ…');
+  try {
+    const ответ = await tools.fileLink(path, 24);
+    const url = ответ.split('\n')[0].trim();
+    await navigator.clipboard.writeText(url).catch(() => {});
+    window.open(url, '_blank', 'noopener');
+    toast('ССЫЛКА В БУФЕРЕ · ЖИВЁТ СУТКИ', '', 6000);
+  } catch (e) { toast(`НЕ ВЫШЛО: ${e.message}`, 'err', 7000); }
 }
 
 /* ── быстрая мысль ───────────────────────────────────────── */

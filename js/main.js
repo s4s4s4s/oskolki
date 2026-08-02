@@ -1,7 +1,7 @@
 // Точка входа: загрузка, роутер, верхняя/нижняя полосы, живой канал, клавиатура.
 import { getSettings, saveSettings, clearSettings, initTransport, liveChannel, transport, IS_NATIVE } from './api.js';
 import { fetchIndex, modelFrom, applyModel, corpus } from './corpus.js';
-import { renderConnect, renderGraph, renderNote, renderCards, renderSearch, renderAsk, renderHealth, renderTriage, renderTimeline, renderPeople, initCapture, initNoteCreator, initPalette, toast, notePush, $ } from './views.js';
+import { renderConnect, renderGraph, renderNote, renderCards, renderSearch, renderAsk, renderHealth, renderArchive, renderTriage, renderTimeline, renderPeople, initCapture, initNoteCreator, initPalette, toast, notePush, $ } from './views.js';
 import { IS_APP, INDEX_REBUILD_MS } from './config.js';
 import { loadIndexCache, saveIndexCache } from './store.js';
 import { flushQueue, pendingWrites } from './write.js';
@@ -47,6 +47,10 @@ function route() {
     drawStrip('');
     renderHealth(view);
     setBar('ЧТО НАКОПИЛОСЬ И ТРЕБУЕТ РУКИ&nbsp;&nbsp;&nbsp;КЛИК — ОТКРЫТЬ ЗАМЕТКУ');
+  } else if (name === 'archive') {
+    drawStrip('');
+    renderArchive(view);
+    setBar('УЛИКИ И ВЛОЖЕНИЯ&nbsp;&nbsp;&nbsp;ПЕРЕТАЩИ ФАЙЛ — ЗАГРУЗИТСЯ&nbsp;&nbsp;&nbsp;КЛИК ПО ВЛОЖЕНИЮ — ССЫЛКА НА СУТКИ');
   } else if (name === 'triage') {
     drawStrip('');
     renderTriage(view);

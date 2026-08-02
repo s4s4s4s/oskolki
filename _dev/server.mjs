@@ -238,6 +238,30 @@ async function callTool(name, args = {}) {
       const entries = await listDir(args.path || '');
       return entries.map(e => `${e.type === 'dir' ? '[папка] ' : ''}${e.path}${e.type === 'file' ? ` (${e.size} б)` : ''}`).join('\n');
     }
+    /* Архив с вложениями. Стенд существует ради того, чтобы это можно было
+       щупать без боевого воркера, поэтому контракт повторяется точно: приём
+       base64, отдача base64 и ссылка. Ссылка тут без подписи — стенд слушает
+       localhost и секретов не бережёт, а проверять надо тракт, а не крипту. */
+    case 'vault_upload': {
+      const b64 = String(args.base64 || '').replace(/^data:[^;]*;base64,/, '').replace(/\s/g, '');
+      if (!b64) throw new Error('Пустое содержимое.');
+      const abs = join(SANDBOX, args.path);
+      await mkdir(dirname(abs), { recursive: true });
+      await writeFile(abs, Buffer.from(b64, 'base64'));
+      push([args.path], `upload: ${args.path}`);
+      return `Загружен ${args.path} (${Math.round((b64.length * 3) / 4 / 1024)} КБ). Песочница.`;
+    }
+    case 'vault_binary': {
+      for (const root of [SANDBOX, VAULT]) {
+        try { return (await readFile(join(root, args.path))).toString('base64'); } catch {}
+      }
+      throw new Error(`Файла ${args.path} нет.`);
+    }
+    case 'vault_file_link': {
+      const hours = Math.min(Math.max(Number(args.hours) || 24, 1), 168);
+      return `http://localhost:${PORT}/file?p=${encodeURIComponent(args.path)}\n\nЖивёт ${hours} ч (на стенде — без подписи).`;
+    }
+
     // История — из настоящего git настоящего вальта: read-only, песочница тут ни
     // при чём. Это ровно то, что вернёт воркер через GitHub API.
     case 'vault_history': {
@@ -353,6 +377,24 @@ const server = createServer(async (req, res) => {
     tickets.set(t, ts);
     res.writeHead(200, { ...CORS, 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({ ts, t }));
+  }
+
+  /* Отдача файла по ссылке. У боевого воркера тут подпись и срок; стенд слушает
+     localhost, поэтому проверяется только то, что ради чего ссылка и нужна:
+     файл открывается браузером с правильным типом, а не скачивается безымянным
+     куском байтов. */
+  if (url.pathname === '/file') {
+    const p = url.searchParams.get('p') || '';
+    for (const root of [SANDBOX, VAULT]) {
+      try {
+        const bytes = await readFile(join(root, p));
+        const ext = (p.split('.').pop() || '').toLowerCase();
+        const mime = { pdf: 'application/pdf', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', md: 'text/markdown; charset=utf-8' }[ext] || 'application/octet-stream';
+        res.writeHead(200, { ...CORS, 'Content-Type': mime, 'Content-Disposition': `inline; filename*=UTF-8''${encodeURIComponent(p.split('/').pop())}` });
+        return res.end(bytes);
+      } catch {}
+    }
+    return notFound(res);
   }
 
   // включить/выключить эмуляцию конфликта записи: -d '{"on":true,"sticky":false}'
