@@ -1,0 +1,15 @@
+{
+  "name": "Осколки — карта памяти",
+  "short_name": "Осколки",
+  "description": "Второй мозг как созвездие: граф, картотека, правка заметок",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#07090F",
+  "theme_color": "#07090F",
+  "lang": "ru",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "icon-maskable.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "maskable" }
+  ]
+}
