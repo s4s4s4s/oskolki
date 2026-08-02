@@ -253,6 +253,24 @@ html.native .strip .info{-webkit-app-region:no-drag}
 .ask-ctx{margin-top:18px}
 .ask-ctx-hd{font:500 9px var(--mono);letter-spacing:.22em;color:var(--dim);padding-bottom:8px;border-bottom:1px solid var(--line);margin-bottom:4px}
 
+/* ── командная палитра ── */
+#palette{position:fixed;inset:0;background:rgba(10,12,16,.72);backdrop-filter:blur(4px);display:none;align-items:flex-start;justify-content:center;z-index:60}
+#palette.open{display:flex}
+.palette{margin-top:12vh;width:620px;border:1px solid rgba(240,168,96,.6);background:rgba(19,21,25,.97);box-shadow:0 30px 80px rgba(0,0,0,.6)}
+.palette input{width:100%;border:none;border-bottom:1px solid rgba(240,168,96,.35);padding:14px 16px;font:400 14px var(--ui);color:var(--bright);background:transparent}
+.pl-list{max-height:48vh;overflow-y:auto}
+.pl-row{display:flex;align-items:center;gap:10px;padding:9px 16px;cursor:pointer;border-bottom:1px solid var(--line-sub)}
+.pl-row:last-child{border-bottom:none}
+.pl-row.sel,.pl-row:hover{background:rgba(240,168,96,.1);box-shadow:inset 2px 0 0 var(--amber)}
+.pl-row .nm{font:400 13px var(--ui);color:var(--text)}
+.pl-row .hint{margin-left:auto;font:400 9.5px var(--mono);color:var(--dim)}
+.pl-cmd{color:var(--amber);font-size:10px;width:8px}
+.pl-foot{padding:8px 16px;border-top:1px solid rgba(240,168,96,.25);font:400 9px var(--mono);letter-spacing:.14em;color:var(--dim)}
+
+/* ── здоровье вальта ── */
+.health{display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:14px;padding-top:14px}
+.health-block .rail-rows{max-height:280px;overflow-y:auto}
+
 /* загрузка */
 .splash{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px}
 .splash .gem{width:16px;height:16px;background:linear-gradient(135deg,#ffd9a0,#f0a860);transform:rotate(45deg);box-shadow:0 0 20px rgba(240,168,96,.9);animation:spin 2.4s linear infinite}

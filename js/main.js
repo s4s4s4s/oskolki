@@ -1,7 +1,7 @@
 // Точка входа: загрузка, роутер, верхняя/нижняя полосы, живой канал, клавиатура.
 import { getSettings, saveSettings, clearSettings, initTransport, liveChannel, transport, IS_NATIVE } from './api.js';
 import { fetchIndex, modelFrom, applyModel, corpus } from './corpus.js';
-import { renderConnect, renderGraph, renderNote, renderCards, renderSearch, renderAsk, initCapture, initNoteCreator, toast, notePush, $ } from './views.js';
+import { renderConnect, renderGraph, renderNote, renderCards, renderSearch, renderAsk, renderHealth, initCapture, initNoteCreator, initPalette, toast, notePush, $ } from './views.js';
 import { IS_APP, INDEX_REBUILD_MS } from './config.js';
 import { loadIndexCache, saveIndexCache } from './store.js';
 import { flushQueue, pendingWrites } from './write.js';
@@ -43,6 +43,10 @@ function route() {
     const q = new URLSearchParams(rest.split('?')[1] || h.split('?')[1] || '').get('q') || '';
     renderSearch(view, q);
     setBar('ENTER — ИСКАТЬ / ОТКРЫТЬ ПЕРВОЕ&nbsp;&nbsp;&nbsp;ПАМЯТЬ — МГНОВЕННО И ОФЛАЙН, СЕРВЕР — СВЕЖЕЕ');
+  } else if (name === 'health') {
+    drawStrip('');
+    renderHealth(view);
+    setBar('ЧТО НАКОПИЛОСЬ И ТРЕБУЕТ РУКИ&nbsp;&nbsp;&nbsp;КЛИК — ОТКРЫТЬ ЗАМЕТКУ');
   } else if (name === 'ask') {
     drawStrip('ask');
     const q = new URLSearchParams(rest.split('?')[1] || h.split('?')[1] || '').get('q') || '';
@@ -202,6 +206,9 @@ async function refreshCorpus() {
 
 /* ── клавиатура ── */
 document.addEventListener('keydown', e => {
+  // Палитра открывается всегда, даже из поля ввода: это единственный способ
+  // выбраться куда угодно, не отрывая рук от клавиатуры.
+  if ((e.ctrlKey || e.metaKey) && e.code === 'KeyK') { e.preventDefault(); state.palette?.open(); return; }
   const typing = /INPUT|TEXTAREA/.test(document.activeElement?.tagName || '');
   if (e.key === 'Escape' && !typing) {
     if ($('#capture').classList.contains('open') || $('#modal').classList.contains('open')) return;
@@ -240,6 +247,7 @@ $('#btn-new').addEventListener('click', () => state.creator.open());
 $('#btn-conn').addEventListener('click', resetConnection);
 state.capture = initCapture();
 state.creator = initNoteCreator();
+state.palette = initPalette();
 
 stashLaunchParams();   // до всего: ярлык и «поделиться» приходят с query
 

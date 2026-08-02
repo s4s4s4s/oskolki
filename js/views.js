@@ -9,6 +9,7 @@ import { DEFAULT_URL, DAILY_THOUGHTS, MODEL } from './config.js';
 import { buildContext, packForChat, askClaude, getAiSettings, saveAiSettings, forgetKey, mcpConfig, MODES } from './ai.js';
 import { appendThought, dailyPath, createNote, safeFileName, addSection, patchSection, TEMPLATES, toggleTag, linkTo, unlinkFrom, renameTag } from './write.js';
 import { LINK_TYPES, TYPE_OF_FIELD, FIELD_OF_TYPE } from './frontmatter.js';
+import { parseQuery, filterNotes, matches, hasFilters, describe, FIELDS } from './query.js';
 import { diffLines, collapseSame } from './diff.js';
 
 export const $ = (sel, el = document) => el.querySelector(sel);
@@ -738,7 +739,7 @@ const searchState = { mode: 'local' };
 export function renderSearch(root, q) {
   root.innerHTML = `<div class="search-wrap"><div class="search-col">
     <div class="search-box"><span style="color:var(--amber);font-size:15px">⌕</span>
-      <input id="s-q" placeholder="что ищем в памяти…" value="${escA(q || '')}" spellcheck="false">
+      <input id="s-q" placeholder="слова, или tag:ереван type:task -is:done after:2026-06" value="${escA(q || '')}" spellcheck="false" title="фильтры: ${Object.entries(FIELDS).map(([k, v]) => k + ' — ' + v).join('\n')}">
       <span class="seg" style="display:flex;gap:0">
         <button class="chip" data-m="local" title="по корпусу в браузере — мгновенно и офлайн">ПАМЯТЬ</button>
         <button class="chip" data-m="server" title="vault_search на воркере — видит свежие правки">СЕРВЕР</button>
@@ -772,7 +773,20 @@ export function renderSearch(root, q) {
 
   async function runLocal(query) {
     const t0 = performance.now();
-    const { results, terms } = await searchCorpus(query, 25);
+    // Запрос может быть чисто фильтрующим: «type:task -is:done» без единого
+    // слова. Тогда искать нечего — просто отбираем по свойствам из карты.
+    const q = parseQuery(query);
+    if (!q.text.trim()) {
+      const list = filterNotes(q).sort((a, b) => new Date(b.meta.h || 0) - new Date(a.meta.h || 0)).slice(0, 200);
+      stats.innerHTML = `<span style="color:var(--amber-l)">${list.length} ${plural(list.length, 'ЗАМЕТКА', 'ЗАМЕТКИ', 'ЗАМЕТОК')}</span>`
+        + `<span>${Math.round(performance.now() - t0)} МС · ФИЛЬТР ${describe(q).toUpperCase()}</span>`;
+      resBox.innerHTML = rowsHtml(list.map(n => ({ path: n.path, title: n.title, chain: '', fragHtml: `<span style="color:var(--dim)">${(n.tags || []).map(t => '#' + t).join(' ') || n.zone}</span>` })));
+      hint.hidden = true;
+      wire();
+      return;
+    }
+    const { results: all, terms } = await searchCorpus(q.text, 60);
+    const results = (hasFilters(q) ? all.filter(r => { const n = corpus.byPath.get(r.path); return n && matches(n, q); }) : all).slice(0, 25);
     const found = Math.round(performance.now() - t0);
     // Фрагменты стоят чтения файлов, поэтому подтягиваются только для верхних
     // результатов: остальное человек всё равно не увидит без прокрутки.
@@ -972,6 +986,111 @@ function openAiSettings(onClose) {
   });
   wrap.addEventListener('click', e => { if (e.target === wrap) close(); });
   wrap.addEventListener('keydown', e => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+}
+
+/* ── командная палитра ───────────────────────────────────────────────────────
+   Один вход во всё: заметки по названию, фильтры, действия. На десяти тысячах
+   заметок навигация мышью по спискам перестаёт работать — быстрее набрать три
+   буквы, чем найти строку глазами. */
+export function initPalette() {
+  const wrap = $('#palette');
+  const COMMANDS = [
+    { label: 'Быстрая мысль', hint: 'N', run: () => document.getElementById('btn-capture').click() },
+    { label: 'Новая заметка', hint: 'C', run: () => document.getElementById('btn-new').click() },
+    { label: 'Спросить память', hint: '', run: () => { location.hash = '#/ask'; } },
+    { label: 'Здоровье вальта', hint: 'сироты, битые, застой', run: () => { location.hash = '#/health'; } },
+    { label: 'Все теги', hint: 'переименование и слияние', run: () => showAllTags() },
+    { label: 'Карта', hint: 'G', run: () => { location.hash = '#/graph'; } },
+    { label: 'Картотека', hint: 'K', run: () => { location.hash = '#/cards'; } },
+    { label: 'Заметки-сироты', hint: 'is:orphan', run: () => { location.hash = '#/search?q=' + encodeURIComponent('is:orphan'); } },
+    { label: 'Битые ссылки', hint: 'is:broken', run: () => { location.hash = '#/search?q=' + encodeURIComponent('is:broken'); } },
+    { label: 'Без тегов', hint: 'is:untagged', run: () => { location.hash = '#/search?q=' + encodeURIComponent('is:untagged') } },
+  ];
+  wrap.innerHTML = `<div class="palette"><input id="pl-in" placeholder="куда идём? заметка, фильтр или действие" spellcheck="false" autocomplete="off">
+    <div class="pl-list" id="pl-list"></div>
+    <div class="pl-foot">↑↓ — выбор · ENTER — открыть · ESC — закрыть</div></div>`;
+  const input = $('#pl-in', wrap), list = $('#pl-list', wrap);
+  let items = [], sel = 0;
+
+  const build = () => {
+    const q = input.value.trim().toLowerCase();
+    const notes = (q ? corpus.notes.filter(n => n.title.toLowerCase().includes(q) || n.path.toLowerCase().includes(q))
+      : corpus.notes.slice().sort((a, b) => new Date(b.meta.h || 0) - new Date(a.meta.h || 0)))
+      .slice(0, 12)
+      .map(n => ({ label: n.title, hint: `${zn(n)} · ${fmtAge(n.meta.h)}`, dot: n.zoneRef?.color, run: () => openNote(n) }));
+    const cmds = COMMANDS.filter(c => !q || c.label.toLowerCase().includes(q));
+    items = q ? [...notes, ...cmds] : [...cmds, ...notes];
+    sel = 0;
+    draw();
+  };
+  const draw = () => {
+    list.innerHTML = items.map((it, i) => `<div class="pl-row ${i === sel ? 'sel' : ''}" data-i="${i}">
+      ${it.dot ? `<span class="dot glow" style="background:${it.dot};color:${it.dot}"></span>` : '<span class="pl-cmd">▸</span>'}
+      <span class="nm">${escA(it.label)}</span><span class="hint">${escA(it.hint || '')}</span></div>`).join('')
+      || '<div class="pl-row" style="color:var(--dim)">ничего не нашлось</div>';
+    list.querySelectorAll('[data-i]').forEach(r => r.addEventListener('click', () => { const it = items[+r.dataset.i]; close(); it.run(); }));
+    list.querySelector('.sel')?.scrollIntoView({ block: 'nearest' });
+  };
+  const open = () => { wrap.classList.add('open'); input.value = ''; build(); setTimeout(() => input.focus(), 20); };
+  const close = () => { wrap.classList.remove('open'); document.activeElement?.blur(); };
+
+  input.addEventListener('input', build);
+  wrap.addEventListener('keydown', e => {
+    if (e.key === 'ArrowDown') { e.preventDefault(); sel = Math.min(sel + 1, items.length - 1); draw(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); sel = Math.max(sel - 1, 0); draw(); }
+    else if (e.key === 'Enter') { const it = items[sel]; if (it) { close(); it.run(); } }
+    else if (e.key === 'Escape') { e.stopPropagation(); close(); }
+  });
+  wrap.addEventListener('click', e => { if (e.target === wrap) close(); });
+  return { open, close };
+}
+
+/* ── здоровье вальта ─────────────────────────────────────────────────────────
+   Что накопилось и требует руки: заметки, на которые никто не ссылается,
+   ссылки в пустоту, застоявшееся, разросшееся, неразобранное. На двух сотнях
+   это видно глазами; дальше — только списком. */
+export function renderHealth(root) {
+  const notes = corpus.notes.filter(isVisible);
+  const now = Date.now();
+  const age = n => (now - Date.parse(n.meta.h || n.meta.u || 0)) / 864e5;
+
+  const groups = [
+    { key: 'broken', title: 'БИТЫЕ ССЫЛКИ', hint: 'ссылка есть, заметки нет — либо создать, либо убрать',
+      items: notes.filter(n => n.broken?.length).map(n => ({ n, extra: n.broken.slice(0, 3).join(', ') })) },
+    { key: 'orphan', title: 'СИРОТЫ', hint: 'никто не ссылается — заметка выпала из памяти',
+      items: notes.filter(n => !n.backlinks?.length && !n.zoneRef?.chronicle).map(n => ({ n, extra: `${n.links.length} исходящих` })) },
+    { key: 'untagged', title: 'БЕЗ ТЕГОВ И СВЯЗЕЙ', hint: 'нечем найти, кроме слов — кандидаты на разбор',
+      items: notes.filter(n => !n.tags?.length && !n.links.length && !n.backlinks?.length).map(n => ({ n, extra: fmtBytes(n.meta.b) })) },
+    { key: 'stale', title: 'ЗАСТОЙ ПОЛГОДА', hint: 'не трогалось давно — перечитать или отпустить в архив',
+      items: notes.filter(n => age(n) > 180 && !n.zoneRef?.chronicle).map(n => ({ n, extra: fmtAge(n.meta.h) })) },
+    { key: 'huge', title: 'РАЗРОСЛИСЬ', hint: 'больше 20 КБ — пора делить на части',
+      items: notes.filter(n => (n.meta.b || 0) > 20000).map(n => ({ n, extra: fmtBytes(n.meta.b) })) },
+  ];
+
+  const lonelyTags = [...corpus.tagCounts].filter(([, c]) => c === 1);
+
+  root.innerHTML = `<div class="cards-wrap"><div class="toolbar">
+      <span class="lbl">ЗДОРОВЬЕ ВАЛЬТА</span>
+      <span style="font-size:10px;color:var(--mid)">${notes.length} ${plural(notes.length, 'заметка', 'заметки', 'заметок')} в работе · теги: ${corpus.tagCounts.size}${lonelyTags.length ? ` (одиночек ${lonelyTags.length})` : ''}</span>
+      <span class="sp"></span>
+      <span style="font-size:10px;color:var(--dim)">клик по строке — открыть заметку</span>
+    </div>
+    <div class="cards-body"><div class="health">${groups.map(g => `
+      <div class="panel health-block">
+        <div class="hd">${g.title} · ${g.items.length}</div>
+        <div style="padding:7px 12px;font-size:9.5px;color:var(--dim)">${g.hint}</div>
+        <div class="rail-rows">${g.items.slice(0, 40).map(({ n, extra }) => `
+          <div data-p="${escA(n.path)}">${zoneDot(n.zoneRef)}<span class="nm">${n.title}</span><span class="zn">${escA(String(extra))}</span></div>`).join('')
+          || '<div style="cursor:default;color:var(--green);font-size:10px">чисто</div>'}
+          ${g.items.length > 40 ? `<div style="cursor:default;color:var(--dim);font-size:10px">…и ещё ${g.items.length - 40}</div>` : ''}</div>
+      </div>`).join('')}
+      ${lonelyTags.length ? `<div class="panel health-block"><div class="hd">ТЕГИ-ОДИНОЧКИ · ${lonelyTags.length}</div>
+        <div style="padding:7px 12px;font-size:9.5px;color:var(--dim)">поставлены один раз — обычно опечатка или дубль существующего</div>
+        <div style="display:flex;gap:5px;flex-wrap:wrap;padding:10px 12px">${lonelyTags.map(([t]) => `<button class="chip" data-tag="${escA(t)}">#${escA(t)}</button>`).join('')}</div></div>` : ''}
+    </div></div></div>`;
+
+  root.querySelectorAll('[data-p]').forEach(r => r.addEventListener('click', () => { location.hash = `#/note/${encodeURIComponent(r.dataset.p)}`; }));
+  root.querySelectorAll('[data-tag]').forEach(b => b.addEventListener('click', () => { location.hash = `#/cards?tag=${encodeURIComponent(b.dataset.tag)}`; }));
 }
 
 /* ── быстрая мысль ───────────────────────────────────────── */
