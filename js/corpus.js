@@ -14,13 +14,27 @@ import {
 import { prepareChunks, parseSynonyms, searchChunks } from './search.js';
 import { searchVectors, fuseRRF, getEmbedSettings, vecState } from './vectors.js';
 
+/* Правила памяти приходят из карты — их кладёт туда сборщик, читая
+   _tools/схема.json. Приложение своей копии не держит: пятая копия одного
+   списка это пятое место, где его забудут поправить. Запасные значения нужны
+   для вальта без схемы: работать можно, просто без новых видов. */
+export const ЗАПАСНАЯ_СХЕМА = {
+  виды_утверждений: {
+    факт: '', решение: '', правило: '', наблюдение: '', договорённость: '', намерение: '',
+  },
+  статусы: ['актуально', 'устарело', 'отменено'],
+};
+export const схема = () => corpus.схема || ЗАПАСНАЯ_СХЕМА;
+export const типыУтверждений = () => Object.keys(схема().виды_утверждений || {});
+
 export const corpus = {
   notes: [],           // {path, base, title, zone, zoneRef, type, status, tags, meta, out, in, links, backlinks, deg}
   byPath: new Map(),
   byBase: new Map(),
   zones: [],           // {name, label, color, count, on, chronicle}
   edges: [],           // [{a, b, type}]
-  layers: [],          // {name, count, on} — тип заметки: note, person, card…
+  layers: [],          // {name, count, on} — класс памяти
+  схема: null,         // правила из вальта, приезжают вместе с картой
   tagCounts: new Map(),
   linkTypes: {},
   chunks: [],          // только для старой схемы
@@ -178,6 +192,7 @@ export function buildFromMap(map) {
     notes, byPath, byBase, zones, edges,
     layers: buildLayers(notes, prevLayers),
     tagCounts, linkTypes: map.linkTypes || {},
+    схема: map.схема || null,
     chunks: [], fromMap: true,
   };
 }

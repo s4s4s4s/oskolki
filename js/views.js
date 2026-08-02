@@ -1,6 +1,6 @@
 // Экраны: подключение, граф, заметка, картотека, поиск + быстрая мысль + тосты.
 import { tools, isConflict, getSettings, saveSettings, clearSettings, initTransport, AuthError, NetError, IS_NATIVE } from './api.js';
-import { corpus, resolveWiki, searchCorpus, textOf, isVisible } from './corpus.js';
+import { corpus, resolveWiki, searchCorpus, textOf, isVisible, типыУтверждений } from './corpus.js';
 import { withSnippets, noteText, forgetText } from './map.js';
 import { markTerms, queryTerms, parseSynonyms, parseServerSearch } from './search.js';
 import { splitFrontmatter, parseSections, renderMd, fmtBytes, fmtAge, plural } from './md.js';
@@ -1952,9 +1952,7 @@ export function initCapture() {
     <textarea id="cap-ta" placeholder="записать мысль… (Ctrl+Enter — сохранить)"></textarea>
     <div id="cap-claim" hidden style="padding:0 14px 4px">
       <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
-        <span class="lbl">ЭТО</span>
-        ${['факт', 'решение', 'правило', 'наблюдение', 'договорённость', 'намерение'].map((t, i) =>
-          `<button class="chip${i === 0 ? ' on' : ''}" data-ctype="${t}">${t.toUpperCase()}</button>`).join('')}
+        <span class="lbl">ЭТО</span><span id="cap-types"></span>
       </div>
       <div style="display:flex;gap:8px;align-items:center">
         <label style="flex:1"><span class="lbl">О ЧЁМ / О КОМ</span><input id="cap-about" placeholder="начни печатать имя…" spellcheck="false" autocomplete="off"></label>
@@ -2027,11 +2025,24 @@ export function initCapture() {
       $('#cap-about', wrap).focus();
     } else ta.focus();
   };
-  $('#cap-toclaim', wrap).addEventListener('click', () => setMode(!claimMode));
-  claimBox.querySelectorAll('[data-ctype]').forEach(b => b.addEventListener('click', () => {
-    claimBox.querySelectorAll('[data-ctype]').forEach(x => x.classList.toggle('on', x === b));
-    тип = b.dataset.ctype;
-  }));
+  /* Кнопки типов строятся при первом открытии, а не при запуске приложения:
+     список приходит из схемы вместе с картой, а окно быстрой мысли создаётся
+     раньше, чем карта загрузится. Раньше здесь оседал запасной список из шести
+     видов, и «урок» с «опровержением» были недоступны с этого экрана. */
+  const drawTypes = () => {
+    const box = $('#cap-types', wrap);
+    const виды = типыУтверждений();
+    if (box.dataset.n === String(виды.length)) return;
+    box.dataset.n = String(виды.length);
+    box.innerHTML = виды.map((t, i) =>
+      `<button class="chip${i === 0 ? ' on' : ''}" data-ctype="${t}">${t.toUpperCase()}</button>`).join('');
+    тип = виды[0] || 'факт';
+    box.querySelectorAll('[data-ctype]').forEach(b => b.addEventListener('click', () => {
+      box.querySelectorAll('[data-ctype]').forEach(x => x.classList.toggle('on', x === b));
+      тип = b.dataset.ctype;
+    }));
+  };
+  $('#cap-toclaim', wrap).addEventListener('click', () => { drawTypes(); setMode(!claimMode); });
   const hits = $('#cap-hits', wrap);
   $('#cap-about', wrap).addEventListener('input', e => {
     const q = e.target.value.trim().toLowerCase();
