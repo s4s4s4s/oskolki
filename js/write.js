@@ -1,0 +1,195 @@
+// Запись в вальт: быстрая мысль, создание заметок по шаблонам, правка разделов.
+//
+// Все записи идут через vault_* инструменты воркера — файл целиком клиент не гоняет.
+// Формат совпадает с тем, как в вальт пишут скиллы и ночные задачи: дневная заметка
+// `daily/ГГГГ-ММ-ДД.md`, мысль строкой `- **ЧЧ:ММ** текст` под разделом «Мысли»,
+// новые заметки — из `templates/*.md` с подстановкой {{date}} и {{title}}.
+import { tools, ToolError, NetError } from './api.js';
+import { DAILY_DIR, DAILY_THOUGHTS } from './config.js';
+import { queuePush, queueAll, queueDrop, queueCount } from './store.js';
+
+export const ymd = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+const hm = (d = new Date()) => `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+export const dailyPath = (d = new Date()) => `${DAILY_DIR}/${ymd(d)}.md`;
+
+// Воркер сообщает об отсутствующем заголовке двумя разными фразами: vault_section
+// говорит «Заголовка «X» нет», vault_patch — «Заголовок «X» не найден». Ловим обе,
+// иначе мысль в файл без раздела «Мысли» просто не запишется.
+const NO_FILE = /нет файла|Файла .* нет/i;
+const NO_HEADING = /Заголов(?:ок|ка) «|не найден/i;
+
+// Шаблоны вальта. Читаем настоящие файлы: там формат фронтматтера, разделы и
+// wikilinks в том виде, в каком их ждут Obsidian и ночная консолидация.
+export const TEMPLATES = [
+  { file: 'templates/Заметка.md', label: 'ЗАМЕТКА', zone: 'brain' },
+  { file: 'templates/Проект.md', label: 'ПРОЕКТ', zone: 'projects' },
+  { file: 'templates/Человек.md', label: 'ЧЕЛОВЕК', zone: 'people' },
+  { file: 'templates/Решение.md', label: 'РЕШЕНИЕ', zone: 'brain/decisions' },
+];
+
+const tplCache = new Map();
+export async function readTemplate(file) {
+  if (tplCache.has(file)) return tplCache.get(file);
+  const text = await tools.read(file);
+  tplCache.set(file, text);
+  return text;
+}
+
+export const fillTemplate = (tpl, { title = '', date = ymd() } = {}) =>
+  tpl.replace(/\{\{date\}\}/g, date).replace(/\{\{title\}\}/g, title);
+
+// Встроенный запасной шаблон дня: если templates/Daily.md недоступен, мысль всё
+// равно должна записаться — терять её из-за отсутствия шаблона нельзя.
+const FALLBACK_DAILY = date => `---
+type: daily
+status: active
+created: ${date}
+description: "Дневная заметка ${date}"
+tags: [daily]
+---
+
+# ${date}
+
+## События
+
+## ${DAILY_THOUGHTS}
+`;
+
+async function dailyTemplate(date) {
+  try {
+    const tpl = await readTemplate('templates/Daily.md');
+    return fillTemplate(tpl, { date });
+  } catch {
+    return FALLBACK_DAILY(date);
+  }
+}
+
+// Вставка строки в конец раздела при создании файла (сервером пока не через что).
+function insertUnder(text, heading, line) {
+  const lines = text.split('\n');
+  const at = lines.findIndex(l => l.replace(/ /g, ' ').trim().toLowerCase() === `## ${heading}`.toLowerCase());
+  if (at === -1) return `${text.replace(/\s+$/, '')}\n\n## ${heading}\n\n${line}\n`;
+  let end = at + 1;
+  while (end < lines.length && !/^#{1,6} /.test(lines[end])) end++;
+  while (end > at + 1 && lines[end - 1].trim() === '') end--;
+  lines.splice(end, 0, '', line);
+  return lines.join('\n').replace(/\s+$/, '') + '\n';
+}
+
+/* ── очередь на случай обрыва связи ──────────────────────────────────────────
+   В очередь кладётся ЛОГИЧЕСКАЯ операция, а не конкретный вызов инструмента:
+   офлайн неизвестно, существует ли уже дневной файл, и выбирать между patch и
+   create придётся заново — в момент отправки. */
+const queueable = async (kind, payload, run) => {
+  try { return await run(); }
+  catch (e) {
+    if (!(e instanceof NetError)) throw e;
+    await queuePush({ kind, payload });
+    return { queued: true, kind };
+  }
+};
+
+export const pendingWrites = () => queueCount();
+
+// Досылка. Порядок сохраняется: записи уходят так же, как набирались.
+// Сетевая ошибка обрывает досылку (связь снова пропала), содержательная —
+// снимает запись с очереди, иначе она будет вечно стучаться в стену.
+export async function flushQueue({ onSent, onFailed } = {}) {
+  const items = await queueAll();
+  let sent = 0;
+  for (const it of items) {
+    try {
+      await runQueued(it);
+      await queueDrop(it.id);
+      sent++; onSent && onSent(it);
+    } catch (e) {
+      if (e instanceof NetError) break;
+      await queueDrop(it.id);
+      onFailed && onFailed(it, e);
+    }
+  }
+  return { sent, left: await queueCount() };
+}
+
+function runQueued(it) {
+  const p = it.payload;
+  switch (it.kind) {
+    case 'thought': return writeThought(p.text, new Date(p.when));
+    case 'note': return writeNote(p);
+    case 'section': return addSection(p.path, p.heading, p.content);
+    case 'patch': return patchSection(p.path, p.heading, p.content, p.operation);
+    default: throw new ToolError(`неизвестная запись в очереди: ${it.kind}`);
+  }
+}
+
+/* ── быстрая мысль ────────────────────────────────────────────────────────── */
+
+// Три ветки, потому что три реальных состояния дня: файла нет, файл есть без
+// раздела «Мысли», файл есть с разделом. Ни одна не должна терять текст.
+async function writeThought(text, when) {
+  const path = dailyPath(when);
+  const line = `- **${hm(when)}** ${text.trim()}`;
+  try {
+    const answer = await tools.patch(path, DAILY_THOUGHTS, line, 'append', `мысль: ${path}`);
+    return { path, answer, mode: 'patch' };
+  } catch (e) {
+    if (!(e instanceof ToolError)) throw e;
+    if (NO_FILE.test(e.message)) {
+      const body = insertUnder(await dailyTemplate(ymd(when)), DAILY_THOUGHTS, line);
+      return { path, answer: await tools.create(path, body), mode: 'create' };
+    }
+    if (NO_HEADING.test(e.message)) {
+      const answer = await tools.append(path, `## ${DAILY_THOUGHTS}\n\n${line}`);
+      return { path, answer, mode: 'append' };
+    }
+    throw e;
+  }
+}
+
+export const appendThought = (text, when = new Date()) =>
+  queueable('thought', { text, when: when.toISOString() }, () => writeThought(text, when))
+    .then(r => ({ path: dailyPath(when), ...r }));
+
+/* ── создание заметки ─────────────────────────────────────────────────────── */
+
+// Имя файла из заголовка: вальт хранит заметки под человеческими именами
+// («Система памяти — обзор.md»), по ним же резолвятся [[wikilinks]].
+export const safeFileName = title => title.trim().replace(/[\\/:*?"<>|#^[\]]/g, ' ').replace(/\s+/g, ' ').trim();
+
+// Первый текст ставится под заголовком файла, ДО первого раздела шаблона.
+// Иначе он падает в самый низ, под «## Связи», и заметка начинается с пустоты.
+function putIntro(text, intro) {
+  const lines = text.split('\n');
+  const h1 = lines.findIndex(l => /^# /.test(l));
+  if (h1 === -1) return `${intro.trim()}\n\n${text}`;
+  let at = h1 + 1;
+  while (at < lines.length && !/^#{2,6} /.test(lines[at])) at++;
+  while (at > h1 + 1 && lines[at - 1].trim() === '') at--;
+  lines.splice(at, 0, '', intro.trim());
+  return lines.join('\n');
+}
+
+async function writeNote({ title, zone, template, description = '', body = '' }) {
+  const name = safeFileName(title);
+  if (!name) throw new Error('нужно имя заметки');
+  const path = `${zone ? zone.replace(/\/$/, '') + '/' : ''}${name}.md`;
+  let text = template ? fillTemplate(await readTemplate(template), { title: name }) : `# ${name}\n`;
+  if (description) text = text.replace(/^description:\s*""\s*$/m, `description: "${description.replace(/"/g, "'")}"`);
+  if (body.trim()) text = putIntro(text, body);
+  const answer = await tools.create(path, text.replace(/\s+$/, '') + '\n');
+  return { path, answer };
+}
+
+export const createNote = opts =>
+  queueable('note', opts, () => writeNote(opts))
+    .then(r => ({ path: `${opts.zone ? opts.zone.replace(/\/$/, '') + '/' : ''}${safeFileName(opts.title)}.md`, ...r }));
+
+/* ── разделы ──────────────────────────────────────────────────────────────── */
+
+export const patchSection = (path, heading, content, operation = 'replace') =>
+  tools.patch(path, heading, content, operation, `${operation}: ${path}`);
+
+// Новый раздел дописывается в конец файла: vault_patch умеет писать только под
+// существующий заголовок, а создавать разделы приложению нужно.
+export const addSection = (path, heading, content = '') =>
+  tools.append(path, `## ${heading}\n\n${content.trim()}`);

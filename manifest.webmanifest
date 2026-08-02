@@ -1,15 +1,50 @@
 {
   "name": "Осколки — карта памяти",
   "short_name": "Осколки",
-  "description": "Второй мозг как созвездие: граф, картотека, правка заметок",
-  "start_url": "./",
+  "description": "Личная карта памяти: граф связей, поиск, запись в вальт и разговор с ИИ по своим заметкам",
+  "lang": "ru",
+  "dir": "ltr",
+  "start_url": "./?source=app",
+  "id": "/oskolki/",
   "scope": "./",
   "display": "standalone",
-  "background_color": "#07090F",
-  "theme_color": "#07090F",
-  "lang": "ru",
+  "display_override": ["window-controls-overlay", "standalone", "minimal-ui"],
+  "orientation": "any",
+  "background_color": "#131519",
+  "theme_color": "#131519",
+  "categories": ["productivity", "utilities"],
+  "launch_handler": { "client_mode": "focus-existing" },
   "icons": [
-    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
-    { "src": "icon-maskable.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "maskable" }
-  ]
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    {
+      "name": "Быстрая мысль",
+      "short_name": "Мысль",
+      "description": "Записать мысль в дневную заметку",
+      "url": "./?action=capture",
+      "icons": [{ "src": "icons/icon-192.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "Спросить память",
+      "short_name": "Спросить",
+      "description": "Задать вопрос своим заметкам",
+      "url": "./#/ask",
+      "icons": [{ "src": "icons/icon-192.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "Поиск",
+      "short_name": "Поиск",
+      "description": "Искать по вальту",
+      "url": "./#/search",
+      "icons": [{ "src": "icons/icon-192.png", "sizes": "192x192" }]
+    }
+  ],
+  "share_target": {
+    "action": "./",
+    "method": "GET",
+    "params": { "title": "title", "text": "text", "url": "url" }
+  }
 }
