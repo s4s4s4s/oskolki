@@ -24,7 +24,11 @@ import { readFile, writeFile, readdir, stat, mkdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join, dirname, extname, resolve, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { execFile } from 'node:child_process';
 import { prepareChunks, parseSynonyms, rankFiles, excerpt } from '../js/search.js';
+
+const git = argv => new Promise(res =>
+  execFile('git', ['-C', VAULT, ...argv], { maxBuffer: 12 << 20 }, (err, out) => res(err ? null : out)));
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const APP = resolve(HERE, '..');
@@ -233,6 +237,23 @@ async function callTool(name, args = {}) {
     case 'vault_list': {
       const entries = await listDir(args.path || '');
       return entries.map(e => `${e.type === 'dir' ? '[папка] ' : ''}${e.path}${e.type === 'file' ? ` (${e.size} б)` : ''}`).join('\n');
+    }
+    // История — из настоящего git настоящего вальта: read-only, песочница тут ни
+    // при чём. Это ровно то, что вернёт воркер через GitHub API.
+    case 'vault_history': {
+      const limit = Math.min(Math.max(args.limit || 20, 1), 100);
+      const out = await git(['log', `-${limit}`, '--format=%H%x09%aI%x09%s', '--', args.path]);
+      if (out == null) return 'Вальт не под git — истории нет.';
+      if (!out.trim()) return `У ${args.path} нет истории — файл ещё не попадал в коммит.`;
+      return out.trim().split('\n').map(l => {
+        const [sha, date, ...msg] = l.split('\t');
+        return `${sha.slice(0, 8)}  ${date.slice(0, 16).replace('T', ' ')}  ${msg.join('\t')}`;
+      }).join('\n');
+    }
+    case 'vault_at': {
+      const out = await git(['show', `${args.sha}:${args.path}`]);
+      if (out == null) throw new Error(`В коммите ${String(args.sha).slice(0, 8)} файла ${args.path} нет.`);
+      return out;
     }
     default:
       throw new Error(`Неизвестный инструмент: ${name}`);

@@ -85,6 +85,10 @@ export const tools = {
   // Перезапись целиком — единственный способ править фронтматтер: он лежит выше
   // любого заголовка, и vault_patch до него не дотягивается.
   write: (path, content, message) => tool('vault_write', { path, content, ...(message ? { message } : {}) }),
+  // История и версии: в вебе — коммиты GitHub через воркер, в приложении — тот
+  // же контракт поверх локального git.
+  history: (path, limit) => tool('vault_history', limit ? { path, limit } : { path }),
+  at: (path, sha) => tool('vault_at', { path, sha }),
 };
 export const isConflict = e => e instanceof ToolError && /конфликт/i.test(e.message);
 

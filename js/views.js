@@ -6,7 +6,7 @@ import { markTerms, queryTerms, parseSynonyms, parseServerSearch } from './searc
 import { splitFrontmatter, parseSections, renderMd, fmtBytes, fmtAge, plural } from './md.js';
 import { GraphView } from './graph.js';
 import { DEFAULT_URL, DAILY_THOUGHTS, MODEL } from './config.js';
-import { buildContext, packForChat, askClaude, getAiSettings, saveAiSettings, forgetKey, mcpConfig, MODES } from './ai.js';
+import { buildContext, packForChat, askClaude, callClaude, getAiSettings, saveAiSettings, forgetKey, mcpConfig, MODES, HELPERS, packHelper } from './ai.js';
 import { appendThought, dailyPath, createNote, safeFileName, addSection, patchSection, TEMPLATES, toggleTag, linkTo, unlinkFrom, renameTag, setNoteField } from './write.js';
 import { LINK_TYPES, TYPE_OF_FIELD, FIELD_OF_TYPE } from './frontmatter.js';
 import { parseQuery, filterNotes, matches, hasFilters, describe, FIELDS } from './query.js';
@@ -130,6 +130,7 @@ export function renderGraph(root, state) {
         <div style="display:flex;gap:5px;flex-wrap:wrap">
           <button class="chip on" data-size="bytes">ОБЪЁМ</button><button class="chip" data-size="deg">СВЯЗИ</button><button class="chip" data-size="commits">ПРАВКИ</button></div></div>
       <div class="blk"><span class="lbl">СЛОИ</span><div id="g-layers" style="display:flex;gap:5px;flex-wrap:wrap"></div></div>
+      <div class="blk" id="g-cl-blk" hidden><span class="lbl">СОЗВЕЗДИЯ ПО СМЫСЛУ</span><div id="g-clusters"></div></div>
       <div class="blk"><span class="lbl">ЗОНЫ</span><div id="g-zones"></div></div>
       <div class="blk"><span class="lbl">ФИЛЬТР</span><input id="g-filter" placeholder="имя_заметки…" spellcheck="false"></div>
       <div class="foot" id="g-foot"></div>
@@ -185,7 +186,24 @@ export function renderGraph(root, state) {
   const withClusters = async () => {
     const cl = await buildClusters();      // сам кэширует и пересчитывает после нового индекса
     if (cl !== graph.clusters) graph.setClusters(cl);
+    drawClusters(cl);
     return cl;
+  };
+  // Список созвездий сбоку: клик — остаться внутри одного, ✦ — попросить ИИ
+  // назвать его по-человечески и сказать, что в нём лежит не на месте.
+  const drawClusters = cl => {
+    const blk = $('#g-cl-blk', root), box = $('#g-clusters', root);
+    blk.hidden = false;
+    box.innerHTML = cl.list.map((c, i) => `<button class="zrow" data-c="${i}" title="${escA(c.label)}">
+      <span class="nm">${escA(c.label.length > 26 ? c.label.slice(0, 24) + '…' : c.label)}</span>
+      <span class="ct">${c.size}</span><span class="ct" data-ai-c="${i}" style="color:var(--amber);cursor:pointer" title="описать созвездие">✦</span></button>`).join('');
+    box.querySelectorAll('[data-c]').forEach(b => b.addEventListener('click', e => {
+      if (e.target.dataset.aiC !== undefined) { aiCluster(cl.list[+e.target.dataset.aiC]); return; }
+      const i = +b.dataset.c;
+      graph.focusCluster = graph.focusCluster === i ? null : i;
+      box.querySelectorAll('[data-c]').forEach(x => x.classList.toggle('on', +x.dataset.c === graph.focusCluster));
+      graph.refreshFilter(); graph._userMoved = false; graph.settle(200);
+    }));
   };
 
   const zonesBox = $('#g-zones', root);
@@ -371,6 +389,7 @@ function drawRail(root, rail, note, sections, reload, path) {
       <div style="display:flex;gap:5px;flex-wrap:wrap;margin-top:10px" id="n-tags">
         ${(note?.tags || []).map(t => `<button class="chip on" data-tag="${escA(t)}" title="фильтр по тегу · Alt+клик снять">#${t}</button>`).join('')}
         <button class="chip" data-addtag title="добавить тег">＋ ТЕГ</button>
+        <button class="chip" data-ai title="предложить теги и связи — применяется только по кнопке">✦ РАЗМЕТИТЬ ИИ</button>
       </div>
     </div></div>
 
@@ -389,6 +408,9 @@ function drawRail(root, rail, note, sections, reload, path) {
       note.broken.map(b => `<div data-broken="${escA(b)}" title="создать эту заметку"><span class="nm">${escA(b)}</span><span class="zn">СОЗДАТЬ</span></div>`).join('')}</div></div>` : ''}
 
     <div class="panel" id="n-similar"><div class="hd">ПОХОЖИЕ</div><div class="rail-rows"><div style="cursor:default;color:var(--dim);font-size:10px">ищу…</div></div></div>
+
+    <div class="panel"><div class="hd">ИСТОРИЯ</div><div class="rail-rows" id="n-hist">
+      <div style="cursor:default"><span class="nm" data-hist style="color:var(--amber-l)">показать правки</span></div></div></div>
 
     <div class="panel"><div class="hd">ОГЛАВЛЕНИЕ</div><div class="toc">${sections.filter(s => s.heading).map(s => `<div data-h="h-${sections.indexOf(s)}">${'#'.repeat(s.level)} ${s.heading}</div>`).join('') || '<div style="cursor:default">без заголовков</div>'}</div></div>`;
 
@@ -429,7 +451,32 @@ function drawRail(root, rail, note, sections, reload, path) {
     location.hash = `#/cards?tag=${encodeURIComponent(tag)}`;
   }));
   $('[data-addtag]', rail)?.addEventListener('click', () => askTag(path, reload));
+  $('[data-ai]', rail)?.addEventListener('click', () => aiMarkup(note, path, reload));
   $('[data-addlink]', rail)?.addEventListener('click', () => askLink(path, reload));
+  /* История. Загружается по требованию: у большинства заметок её открывают
+     редко, а каждый вызов — это поход в GitHub за списком коммитов. Дальше
+     выбранная версия сравнивается с текущей построчно (тот же дифф, что
+     показывается при конфликте записи), и её можно вернуть целиком. */
+  $('[data-hist]', rail)?.addEventListener('click', async () => {
+    const box = $('#n-hist', rail);
+    box.innerHTML = '<div style="cursor:default;color:var(--dim);font-size:10px">читаю git…</div>';
+    let lines;
+    try { lines = (await tools.history(path, 20)).split('\n').filter(Boolean); }
+    catch (e) {
+      box.innerHTML = `<div style="cursor:default;color:var(--dim);font-size:10px">${
+        /неизвестн/i.test(e.message) ? 'воркер ещё без vault_history — нужен деплой' : escA(e.message)}</div>`;
+      return;
+    }
+    const commits = lines.map(l => {
+      const m = l.match(/^([0-9a-f]{6,})\s+(\S+ \S+)\s+(.*)$/);
+      return m ? { sha: m[1], when: m[2], msg: m[3] } : null;
+    }).filter(Boolean);
+    if (!commits.length) { box.innerHTML = `<div style="cursor:default;color:var(--dim);font-size:10px">${escA(lines[0] || 'истории нет')}</div>`; return; }
+    box.innerHTML = commits.map((c, i) => `<div data-sha="${escA(c.sha)}" title="${escA(c.msg)}">
+      <span class="nm">${escA(c.msg.slice(0, 46))}</span><span class="zn">${escA(c.when.slice(5, 16))}${i ? '' : ' · СЕЙЧАС'}</span></div>`).join('');
+    box.querySelectorAll('[data-sha]').forEach(r => r.addEventListener('click', () => showVersion(path, r.dataset.sha, commits.find(c => c.sha === r.dataset.sha), reload)));
+  });
+
   rail.querySelectorAll('[data-broken]').forEach(b => b.addEventListener('click', () => {
     toast(`СОЗДАЙТЕ ЗАМЕТКУ «${b.dataset.broken}» — [C]`, 'warn', 5000);
   }));
@@ -785,6 +832,149 @@ export function renderCards(root, tag) {
   $('#k-tags-all', root)?.addEventListener('click', () => showAllTags());
   $('#k-q', root).addEventListener('input', e => { cardState.q = e.target.value; draw(); });
   drawZones(); draw();
+}
+
+/* ── ИИ-помощники ────────────────────────────────────────────────────────────
+   Общая обвязка для всех помощников. Она устроена так, что ключ Anthropic —
+   удобство, а не условие: с ключом запрос уходит прямо отсюда и ответ печатается
+   на месте, без ключа тот же самый текст копируется в буфер, человек относит его
+   в любой чат и вставляет ответ обратно — разбор и применение одинаковые.
+
+   Ничего не пишется в вальт само: помощник только предлагает, применяет человек. */
+async function runHelper(h, render) {
+  const wrap = $('#modal');
+  const hasKey = !!getAiSettings().key;
+  wrap.innerHTML = `<div class="cap" style="width:760px"><div class="hd">${escA(h.title)}<span>ESC — ЗАКРЫТЬ</span></div>
+    <div class="hint-row">${hasKey ? `модель ${MODEL} · ответ ниже, применяется только по кнопке` : 'ключа нет — запрос уйдёт в буфер, ответ вставьте обратно'}</div>
+    <div class="ask-ctx" id="hp-out" style="max-height:46vh;overflow:auto;margin:10px 14px;white-space:pre-wrap;font:400 12px/1.6 var(--ui);color:var(--text)"></div>
+    <div id="hp-paste" ${hasKey ? 'hidden' : ''} style="padding:0 14px">
+      <textarea id="hp-in" spellcheck="false" placeholder="вставьте сюда ответ модели" style="width:100%;height:110px"></textarea></div>
+    <div class="ft">
+      ${hasKey ? '<button class="btn-amber" style="margin:0" id="hp-run">СПРОСИТЬ</button>' : '<button class="btn-amber" style="margin:0" id="hp-parse">РАЗОБРАТЬ ОТВЕТ</button>'}
+      <button class="btn-line" id="hp-copy">СКОПИРОВАТЬ ЗАПРОС</button>
+      <button class="btn-line" id="hp-close">ЗАКРЫТЬ</button></div></div>`;
+  const close = () => { wrap.classList.remove('open'); document.activeElement?.blur(); };
+  const out = $('#hp-out', wrap);
+  $('#hp-close', wrap).addEventListener('click', close);
+  $('#hp-copy', wrap).addEventListener('click', () => navigator.clipboard.writeText(packHelper(h))
+    .then(() => toast('ЗАПРОС В БУФЕРЕ — ВСТАВЬТЕ В ЛЮБОЙ ЧАТ')).catch(() => toast('БУФЕР НЕДОСТУПЕН', 'err')));
+  wrap.classList.add('open');
+  wrap.addEventListener('keydown', e => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  wrap.addEventListener('click', e => { if (e.target === wrap) close(); });
+
+  const finish = text => { try { render(h.parse(text), out, close); } catch (e) { toast(`ОТВЕТ НЕ РАЗОБРАН: ${e.message}`, 'err'); } };
+  const ask = async () => {
+    const btn = $('#hp-run', wrap); btn.disabled = true; btn.textContent = 'ДУМАЮ…';
+    out.textContent = '';
+    try {
+      const { text } = await callClaude(h.system, h.user, { mode: 'fast', onText: (_, all) => { out.textContent = all ?? out.textContent; } });
+      finish(text);
+    } catch (e) { out.innerHTML = `<div class="conflict">${escA(e.message)}</div>`; }
+    btn.disabled = false; btn.textContent = 'СПРОСИТЬ ЕЩЁ';
+  };
+  if (hasKey) { $('#hp-run', wrap).addEventListener('click', ask); ask(); }
+  else {
+    navigator.clipboard.writeText(packHelper(h)).then(() => toast('ЗАПРОС В БУФЕРЕ')).catch(() => {});
+    $('#hp-parse', wrap).addEventListener('click', () => {
+      const v = $('#hp-in', wrap).value.trim();
+      if (!v) return toast('ВСТАВЬТЕ ОТВЕТ МОДЕЛИ', 'warn');
+      out.textContent = v; finish(v);
+    });
+  }
+}
+
+// Разметка одной заметки: теги из уже существующего словаря вальта и связи с
+// похожими. Всё приходит галочками — ставится только отмеченное.
+async function aiMarkup(note, path, reload) {
+  const text = await textOf(note || path).catch(() => '');
+  const neighbours = (await similarTo(note, 8).catch(() => [])).map(s => s.note);
+  const h = HELPERS.markup({ note, text: splitFrontmatter(text).body, tags: [...corpus.tagCounts], neighbours });
+  runHelper(h, (res, out, close) => {
+    // Отмеченное — это ровно то, что горит: набор живёт в разметке, а не в
+    // отдельном множестве, которое пришлось бы держать с ней в согласии.
+    out.innerHTML = `<div style="font-size:10px;color:var(--dim);letter-spacing:.14em;margin-bottom:6px">ТЕГИ</div>
+      <div style="display:flex;gap:5px;flex-wrap:wrap">${res.tags.map(t => `<button class="chip on" data-x="tag:${escA(t)}">#${escA(t)}</button>`).join('') || '<span style="font-size:10px;color:var(--dim)">не предложено</span>'}</div>
+      <div style="font-size:10px;color:var(--dim);letter-spacing:.14em;margin:12px 0 6px">СВЯЗИ</div>
+      <div style="display:flex;gap:5px;flex-wrap:wrap">${res.links.map(t => `<button class="chip on" data-x="link:${escA(t)}">${escA(t)}</button>`).join('') || '<span style="font-size:10px;color:var(--dim)">не предложено</span>'}</div>
+      <button class="btn-amber" id="hp-apply" style="margin:14px 0 0">ПРИМЕНИТЬ ОТМЕЧЕННОЕ</button>`;
+    out.querySelectorAll('[data-x]').forEach(b => b.addEventListener('click', () => b.classList.toggle('on')));
+    $('#hp-apply', out).addEventListener('click', async () => {
+      const btn = $('#hp-apply', out); btn.disabled = true; btn.textContent = 'ПИШУ…';
+      const errs = [];
+      for (const b of out.querySelectorAll('[data-x].on')) {
+        const [kind, val] = [b.dataset.x.split(':')[0], b.dataset.x.slice(b.dataset.x.indexOf(':') + 1)];
+        try { kind === 'tag' ? await toggleTag(path, val, true) : await linkTo(path, 'relates', val); }
+        catch (e) { errs.push(e.message); }
+      }
+      toast(errs.length ? `ЧАСТИЧНО: ${errs[0]}` : 'РАЗМЕЧЕНО', errs.length ? 'warn' : '');
+      close(); reload();
+    });
+  });
+}
+
+/* Недельная сводка: что трогали, что подвисло, что разобрать. Заметки берутся
+   из корпуса по дате правки — модель получает готовый список, а не ищет сама. */
+async function aiDigest(days = 7) {
+  const since = Date.now() - days * 864e5;
+  const notes = corpus.notes
+    .filter(n => isVisible(n) && Date.parse(n.meta.h || 0) > since)
+    .sort((a, b) => new Date(b.meta.h) - new Date(a.meta.h))
+    .slice(0, 40);
+  if (!notes.length) return toast(`ЗА ${days} ДНЕЙ НИЧЕГО НЕ МЕНЯЛОСЬ`, 'warn');
+  const unsorted = corpus.notes.filter(n => isVisible(n) && !n.zoneRef?.chronicle && (!n.tags?.length || (!n.links.length && !n.backlinks?.length))).slice(0, 20);
+  runHelper(HELPERS.digest({ days, notes, unsorted }), (res, out) => { out.innerHTML = renderMd(res.raw); wireWikiLinks(out); });
+}
+
+// Описание созвездия: механика собрала группу, но назвать её словами человека
+// механика не может — три характерных слова это ещё не имя.
+function aiCluster(cluster) {
+  const notes = cluster.members.map(i => corpus.notes[i]).filter(Boolean).slice(0, 60);
+  runHelper(HELPERS.cluster({ label: cluster.label, notes }), (res, out) => {
+    out.innerHTML = `<div style="font:500 15px var(--ui);color:var(--amber-l);margin-bottom:6px">${escA(res.name || cluster.label)}</div>
+      <div style="margin-bottom:10px">${escA(res.about || '')}</div>
+      ${res.odd && !/всё на месте/i.test(res.odd) ? `<div style="font-size:11px;color:var(--red)">не на месте: ${escA(res.odd)}</div>` : ''}
+      <div style="font-size:10px;color:var(--dim);margin-top:12px">${notes.length} ${plural(notes.length, 'заметка', 'заметки', 'заметок')} в созвездии</div>`;
+  });
+}
+
+/* Одна версия из истории: что было тогда и чем отличается от сегодняшнего.
+
+   Возврат делается обычной перезаписью, а не «git revert»: приложение не умеет
+   и не должно уметь двигать историю репозитория — оно пишет новую версию поверх
+   текущей, и в истории остаётся и то, и другое. Это единственный безопасный
+   способ отката, когда над одним вальтом работают и человек, и машина. */
+async function showVersion(path, sha, meta, reload) {
+  const wrap = $('#modal');
+  wrap.innerHTML = `<div class="cap" style="width:820px"><div class="hd">ВЕРСИЯ ${escA(sha.slice(0, 8))} · ${escA(meta?.when || '')}<span>ESC — ЗАКРЫТЬ</span></div>
+    <div class="hint-row">${escA(meta?.msg || '')}</div>
+    <div class="ask-ctx" id="hv-body" style="max-height:56vh;overflow:auto;margin:10px 14px">читаю…</div>
+    <div class="ft"><button class="btn-amber" style="margin:0" id="hv-restore" disabled>ВЕРНУТЬ ЭТУ ВЕРСИЮ</button>
+      <button class="btn-line" id="hv-close">ЗАКРЫТЬ</button>
+      <span class="note">возврат — это новая запись поверх текущей, история сохраняется целиком</span></div></div>`;
+  const close = () => { wrap.classList.remove('open'); document.activeElement?.blur(); };
+  $('#hv-close', wrap).addEventListener('click', close);
+  wrap.classList.add('open');
+  wrap.addEventListener('keydown', e => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  wrap.addEventListener('click', e => { if (e.target === wrap) close(); });
+
+  let old;
+  try { old = await tools.at(path, sha); }
+  catch (e) { $('#hv-body', wrap).innerHTML = `<div class="conflict">${escA(e.message)}</div>`; return; }
+  const now = await textOf(corpus.byPath.get(path) || path).catch(() => '');
+  // «−» — то, что было в той версии, «+» — то, что стоит сейчас.
+  $('#hv-body', wrap).innerHTML = diffHtml(collapseSame(diffLines(old, now), 2))
+    + (old === now ? '<div style="color:var(--green);font-size:10px;padding:8px 2px">эта версия совпадает с текущей</div>' : '');
+  const btn = $('#hv-restore', wrap);
+  btn.disabled = old === now;
+  btn.addEventListener('click', async () => {
+    btn.disabled = true; btn.textContent = 'ПИШУ…';
+    try {
+      await tools.write(path, old, `откат к ${sha.slice(0, 8)} из «Осколков»`);
+      forgetText(path);
+      toast(`ВЕРНУЛ ВЕРСИЮ ${sha.slice(0, 8).toUpperCase()}`);
+      close(); reload();
+    } catch (e) { btn.disabled = false; btn.textContent = 'ВЕРНУТЬ ЭТУ ВЕРСИЮ'; toast(`НЕ ВЫШЛО: ${e.message}`, 'err'); }
+  });
 }
 
 /* Массовая операция над выбранными заметками.
@@ -1199,6 +1389,8 @@ export function initPalette() {
     { label: 'Разбор', hint: 'неразмеченное по одной', run: () => { location.hash = '#/triage'; } },
     { label: 'Лента', hint: 'по времени правок', run: () => { location.hash = '#/time'; } },
     { label: 'Люди', hint: 'кто и где упоминается', run: () => { location.hash = '#/people'; } },
+    { label: 'Сводка за неделю', hint: 'что было и что подвисло', run: () => aiDigest(7) },
+    { label: 'Сводка за месяц', hint: 'то же, шире', run: () => aiDigest(30) },
     { label: 'Все теги', hint: 'переименование и слияние', run: () => showAllTags() },
     { label: 'Карта', hint: 'G', run: () => { location.hash = '#/graph'; } },
     { label: 'Картотека', hint: 'K', run: () => { location.hash = '#/cards'; } },

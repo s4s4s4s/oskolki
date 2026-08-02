@@ -76,17 +76,19 @@ export class AiError extends Error {}
 
 // Стриминг обязателен: ответ идёт по мере генерации, и длинный разбор не
 // упирается в таймаут соединения.
-export async function askClaude(question, ctx, { mode = 'fast', onText, signal } = {}) {
+export const askClaude = (question, ctx, opts = {}) =>
+  callClaude(SYSTEM_PROMPT, `=== ФРАГМЕНТЫ ИЗ ПАМЯТИ ===\n\n${ctx.text}\n\n=== ВОПРОС ===\n\n${question}`, opts);
+
+export async function callClaude(system, userContent, { mode = 'fast', onText, signal } = {}) {
   const { key } = getAiSettings();
   if (!key) throw new AiError('нет ключа Anthropic — режим «здесь» недоступен');
   const m = MODES[mode] || MODES.fast;
-  const userContent = `=== ФРАГМЕНТЫ ИЗ ПАМЯТИ ===\n\n${ctx.text}\n\n=== ВОПРОС ===\n\n${question}`;
 
   // В десктопе запрос уходит из главного процесса: у него нет CORS, поэтому не
   // нужны браузерные послабления, а ключ не светится в сетевом слое страницы.
   if (typeof window !== 'undefined' && window.shardsNative?.ask) {
     const r = await window.shardsNative.ask(key, {
-      model: MODEL, stream: true, system: SYSTEM_PROMPT,
+      model: MODEL, stream: true, system,
       messages: [{ role: 'user', content: userContent }], ...m.body,
     }, chunk => onText && onText(chunk, null));
     if (!r.ok) {
@@ -112,7 +114,7 @@ export async function askClaude(question, ctx, { mode = 'fast', onText, signal }
         'anthropic-dangerous-direct-browser-access': 'true',
       },
       body: JSON.stringify({
-        model: MODEL, stream: true, system: SYSTEM_PROMPT,
+        model: MODEL, stream: true, system,
         messages: [{ role: 'user', content: userContent }],
         ...m.body,
       }),
@@ -156,6 +158,76 @@ export async function askClaude(question, ctx, { mode = 'fast', onText, signal }
   if (stop === 'refusal') throw new AiError('модель отклонила запрос (refusal)');
   return { text: out, stop };
 }
+
+/* ── помощники ────────────────────────────────────────────────────────────────
+   Три вещи, где модель уместна, а механика не справляется: разметить заметку
+   словами из уже сложившегося словаря вальта, коротко описать созвездие и
+   собрать недельную сводку.
+
+   Каждый помощник — это пара «система + запрос» и разбор ответа. Пара нужна
+   отдельно от вызова, потому что без ключа всё то же самое уходит в буфер и
+   вставляется в любой чат: помощник не должен быть привилегией платного ключа.
+
+   Отдельное правило во всех промптах — не выдумывать теги. Свежепридуманный тег
+   не соединяет заметку ни с чем, он только выглядит как работа. */
+export const HELPERS = {
+  markup: ({ note, text, tags, neighbours }) => ({
+    title: `РАЗМЕТИТЬ «${note.title}»`,
+    system: 'Ты помогаешь разметить заметку в личном обсидиан-вальте. Отвечай строго в заданном формате, без пояснений и вступлений.',
+    user: `Заметка «${note.title}» (${note.path}):
+"""
+${text.slice(0, 6000)}
+"""
+
+Теги, которые уже живут в вальте (число — сколько заметок помечено):
+${tags.map(([t, n]) => `#${t} (${n})`).join(', ') || '(тегов пока нет)'}
+
+Похожие заметки по словам и связям:
+${neighbours.map(n => `- ${n.title}${n.tags?.length ? ` [${n.tags.map(t => '#' + t).join(' ')}]` : ''}`).join('\n') || '(нет)'}
+
+Ответь ровно двумя строками:
+ТЕГИ: до пяти тегов через запятую, только из списка выше — новый придумывай лишь если ни один существующий не подходит, и не больше одного.
+СВЯЗИ: до трёх заголовков из списка похожих, с которыми эту заметку стоит связать по существу, через запятую. Если связывать не с чем — напиши «нет».`,
+    parse: out => {
+      const line = re => (out.match(re)?.[1] || '').split(/\s*,\s*/).map(s => s.trim().replace(/^#/, '')).filter(s => s && !/^нет$/i.test(s));
+      return { tags: line(/ТЕГИ:\s*(.+)/i), links: line(/СВЯЗИ:\s*(.+)/i) };
+    },
+  }),
+
+  cluster: ({ label, notes }) => ({
+    title: `ОПИСАТЬ СОЗВЕЗДИЕ «${label}»`,
+    system: 'Ты описываешь группу заметок из личного вальта. Коротко, по-русски, без воды и без выдумывания фактов, которых нет в заголовках.',
+    user: `Группа собрана механически — по связям между заметками. Её заголовки:
+${notes.map(n => `- ${n.title} (${n.path})`).join('\n')}
+
+Ответь тремя строками:
+ИМЯ: два-три слова, как назвать эту группу.
+О ЧЁМ: одно предложение — что их объединяет.
+ЧТО НЕ НА МЕСТЕ: заголовки, которые к остальным явно не относятся, через запятую (или «всё на месте»).`,
+    parse: out => ({
+      name: (out.match(/ИМЯ:\s*(.+)/i)?.[1] || '').trim(),
+      about: (out.match(/О ЧЁМ:\s*(.+)/i)?.[1] || '').trim(),
+      odd: (out.match(/ЧТО НЕ НА МЕСТЕ:\s*(.+)/i)?.[1] || '').trim(),
+      raw: out,
+    }),
+  }),
+
+  digest: ({ days, notes, unsorted }) => ({
+    title: `СВОДКА ЗА ${days} ${days === 7 ? 'ДНЕЙ' : 'ДН.'}`,
+    system: 'Ты подводишь итог недели по личному вальту. Только то, что видно из заголовков и фрагментов; ничего не додумывай.',
+    user: `Заметки, которых касались за последние ${days} дней:
+${notes.map(n => `- ${n.title} (${n.path}, правка ${String(n.meta.h || '').slice(0, 10)})${n.frag ? `\n  ${n.frag.slice(0, 300)}` : ''}`).join('\n')}
+
+Неразобранное (без тегов или без связей): ${unsorted.map(n => n.title).join(', ') || 'нет'}
+
+Ответь по-русски: три-пять пунктов «что происходило», затем строка «ЧТО ПОДВИСЛО:» с тем, что начато и брошено, затем «ЧТО РАЗОБРАТЬ:» — три заметки из неразобранного, которые важнее прочих, и почему.`,
+    parse: out => ({ raw: out }),
+  }),
+};
+
+// Тот же пакет, но в буфер: без ключа помощники работают ровно так же, только
+// ответ приносит человек из своего чата.
+export const packHelper = h => `${h.system}\n\n${h.user}`;
 
 /* ── подключение вальта к другим ИИ ───────────────────────────────────────── */
 

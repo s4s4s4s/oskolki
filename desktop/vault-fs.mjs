@@ -13,6 +13,7 @@
 import { readFile, writeFile, readdir, stat, mkdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { createHash } from 'node:crypto';
+import { execFile } from 'node:child_process';
 import { join, dirname } from 'node:path';
 import { prepareChunks, parseSynonyms, rankFiles, excerpt } from '../js/search.js';
 
@@ -192,9 +193,34 @@ export class VaultFs {
         const c = await this.write(args.path, args.content);
         return `Перезаписан ${args.path}. Коммит ${c}. Было ${text.length} символов, стало ${args.content.length}.`;
       }
+      /* История берётся у локального git напрямую: приложение стоит на той же
+         машине, что и вальт, поэтому ходить за ней в сеть незачем — это и
+         быстрее, и работает без интернета вообще. Если папка не под git,
+         честно говорим об этом, а не притворяемся, что истории нет. */
+      case 'vault_history': {
+        const limit = Math.min(Math.max(args.limit || 20, 1), 100);
+        const out = await this.git(['log', `-${limit}`, '--format=%H%x09%aI%x09%s', '--', args.path]);
+        if (out == null) return 'Вальт не под git — истории нет.';
+        if (!out.trim()) return `У ${args.path} нет истории — файл ещё не попадал в коммит.`;
+        return out.trim().split('\n').map(l => {
+          const [sha, date, ...msg] = l.split('\t');
+          return `${sha.slice(0, 8)}  ${date.slice(0, 16).replace('T', ' ')}  ${msg.join('\t')}`;
+        }).join('\n');
+      }
+      case 'vault_at': {
+        const out = await this.git(['show', `${args.sha}:${args.path}`]);
+        if (out == null) throw new Error('Вальт не под git — версии недоступны.');
+        return out;
+      }
       default:
         throw new Error(`Неизвестный инструмент: ${name}`);
     }
+  }
+
+  git(argv) {
+    return new Promise(resolve => {
+      execFile('git', ['-C', this.root, ...argv], { maxBuffer: 12 << 20 }, (err, stdout) => resolve(err ? null : stdout));
+    });
   }
 }
 
