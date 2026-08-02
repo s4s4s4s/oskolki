@@ -13,9 +13,11 @@ import { parseQuery, filterNotes, matches, hasFilters, describe, FIELDS } from '
 import { diffLines, collapseSame } from './diff.js';
 import { similarTo, buildClusters } from './similar.js';
 import { initVectors, embedQuery, getEmbedSettings, saveEmbedSettings, vecState } from './vectors.js';
+import { entityAnswer, entityStats, entityIndex, claimsOf } from './entities.js';
 
 export const $ = (sel, el = document) => el.querySelector(sel);
 export const el = (tag, cls, html) => { const d = document.createElement(tag); if (cls) d.className = cls; if (html != null) d.innerHTML = html; return d; };
+const norm2 = s => String(s).toLowerCase().replace(/ё/g,'е').trim();
 const escA = s => s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
 // подпись созвездия: человеческое имя из словаря, а не путь папки
 const zn = note => note?.zoneRef?.label || (note?.zone || '').toUpperCase();
@@ -1240,6 +1242,7 @@ export function renderSearch(root, q) {
       </span>
       <button class="chip" id="s-vec" title="смысловой слой: находит по описанию, когда слово забыто">✦ СМЫСЛ</button></div>
     <div class="search-stats" id="s-stats"></div>
+    <div id="s-entity"></div>
     <div id="s-results"></div>
     <div class="srv-hint" id="s-hint" hidden></div></div></div>`;
   const input = $('#s-q', root), resBox = $('#s-results', root), stats = $('#s-stats', root), hint = $('#s-hint', root);
@@ -1270,8 +1273,39 @@ export function renderSearch(root, q) {
     .replace(/\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|([^\]]*))?\]\]/g, (m, t, a) => a || t)
     .replace(/\*\*/g, '').replace(/^(?:[-*]|>)\s+/gm, '');
 
+  /* Сущностный блок над выдачей. Вопрос к личной памяти почти всегда про
+     кого-то или про что-то, и правильный ответ на него — не фрагмент текста, а
+     то, что про эту сущность известно. Поэтому блок стоит выше обычной выдачи,
+     а не смешивается с ней: это ответ другого рода. */
+  function drawEntity(query) {
+    const box = $('#s-entity', root);
+    const answers = query.trim() ? entityAnswer(query) : null;
+    if (!answers || !answers.length) { box.innerHTML = ''; return; }
+    box.innerHTML = answers.slice(0, 2).map(a => {
+      const dead = c => c.status === 'отменено' || c.status === 'устарело';
+      return `<div class="ent-card">
+        <div class="ent-hd"><span style="color:${a.entity.zoneRef?.color || 'var(--amber)'}">■</span>
+          <b data-p="${escA(a.entity.path)}">${a.entity.title}${
+            // В заголовке заметки может стоять прозвище («pipipupu»), а искали
+            // по имени файла — показываем и его, иначе непонятно, кто это.
+            norm2(a.entity.base) !== norm2(a.entity.title) ? ` <span style="color:var(--dim);font-weight:400">· ${escA(a.entity.base)}</span>` : ''}</b>
+          <span class="zn">${escA((a.entity.kind || 'сущность').toUpperCase())}</span>
+          <span class="sp"></span><span class="zn">${a.total} ${plural(a.total, 'УТВЕРЖДЕНИЕ', 'УТВЕРЖДЕНИЯ', 'УТВЕРЖДЕНИЙ')}</span></div>
+        ${a.claims.length ? `<div class="ent-claims">${a.claims.map(c => `<div data-p="${escA(c.path)}">
+          <span class="w" style="${dead(c) ? 'text-decoration:line-through;opacity:.55' : ''}">${escA(c.title.replace(/^\d{4}-\d{2}-\d{2}\s+/, ''))}</span>
+          <span class="zn">${escA(c.kind || '')} · ${escA(String(c.when || '').slice(0, 10))}</span></div>`).join('')}</div>`
+          : '<div class="ent-claims"><div style="cursor:default;color:var(--dim)">про неё ещё ничего не извлечено</div></div>'}
+        ${a.near.length ? `<div class="ent-near">РЯДОМ: ${a.near.map(n => `<span data-p="${escA(n.note.path)}">${n.note.title}</span>`).join(' · ')}</div>` : ''}
+      </div>`;
+    }).join('');
+    box.querySelectorAll('[data-p]').forEach(el2 => el2.addEventListener('click', () => {
+      location.hash = `#/note/${encodeURIComponent(el2.dataset.p)}`;
+    }));
+  }
+
   async function runLocal(query) {
     const t0 = performance.now();
+    drawEntity(query);
     // Запрос может быть чисто фильтрующим: «type:task -is:done» без единого
     // слова. Тогда искать нечего — просто отбираем по свойствам из карты.
     const q = parseQuery(query);

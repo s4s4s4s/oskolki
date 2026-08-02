@@ -139,6 +139,7 @@ export function buildFromMap(map) {
     kind: n.kt || '',
     when: n.wh || '',
     confidence: n.cf || '',
+    aliases: n.al || [],
     status: n.st || '',
     tags: n.tg || [],
     headings: n.hd || [],

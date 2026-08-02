@@ -299,3 +299,15 @@ html.native .strip .info{-webkit-app-region:no-drag}
 @keyframes spin{to{transform:rotate(405deg)}}
 .splash .st{font-size:10px;color:var(--dim);letter-spacing:.18em}
 .offline-note{position:absolute;left:14px;top:12px;z-index:6;border:1px solid rgba(232,184,75,.45);background:rgba(232,184,75,.08);color:#e6d9b4;font-size:9.5px;padding:5px 10px}
+
+/* ── сущностный блок в поиске ── */
+.ent-card{border:1px solid rgba(240,168,96,.4);background:rgba(240,168,96,.05);margin-bottom:12px}
+.ent-hd{display:flex;align-items:center;gap:8px;padding:9px 12px;border-bottom:1px solid rgba(240,168,96,.25);font:400 12px var(--ui)}
+.ent-hd b{color:var(--bright);font-weight:500;cursor:pointer}
+.ent-hd .zn{font:400 9px var(--mono);letter-spacing:.14em;color:var(--dim)}
+.ent-claims div{display:flex;align-items:baseline;gap:10px;padding:5px 12px;cursor:pointer;border-bottom:1px solid var(--line-sub);font-size:12px}
+.ent-claims div:hover{background:rgba(240,168,96,.08)}
+.ent-claims .w{color:var(--text);flex:1}
+.ent-claims .zn{font:400 9px var(--mono);color:var(--dim);letter-spacing:.1em;white-space:nowrap}
+.ent-near{padding:7px 12px;font:400 9.5px var(--mono);letter-spacing:.1em;color:var(--dim)}
+.ent-near span{color:var(--amber-l);cursor:pointer;margin-right:2px}
