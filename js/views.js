@@ -7,7 +7,7 @@ import { splitFrontmatter, parseSections, renderMd, fmtBytes, fmtAge, plural } f
 import { GraphView } from './graph.js';
 import { DEFAULT_URL, DAILY_THOUGHTS, MODEL } from './config.js';
 import { buildContext, packForChat, askClaude, callClaude, getAiSettings, saveAiSettings, forgetKey, mcpConfig, MODES, HELPERS, packHelper } from './ai.js';
-import { appendThought, dailyPath, createNote, safeFileName, addSection, patchSection, TEMPLATES, toggleTag, linkTo, unlinkFrom, renameTag, setNoteField } from './write.js';
+import { appendThought, dailyPath, createNote, safeFileName, addSection, patchSection, TEMPLATES, toggleTag, linkTo, unlinkFrom, renameTag, setNoteField, saveClaim, ymd } from './write.js';
 import { LINK_TYPES, TYPE_OF_FIELD, FIELD_OF_TYPE } from './frontmatter.js';
 import { parseQuery, filterNotes, matches, hasFilters, describe, FIELDS } from './query.js';
 import { diffLines, collapseSame } from './diff.js';
@@ -1847,8 +1847,21 @@ export function initCapture() {
   const wrap = $('#capture');
   wrap.innerHTML = `<div class="cap"><div class="hd">БЫСТРАЯ МЫСЛЬ → <b id="cap-path" style="color:var(--amber-l)"></b><span>ESC — ЗАКРЫТЬ</span></div>
     <textarea id="cap-ta" placeholder="записать мысль… (Ctrl+Enter — сохранить)"></textarea>
+    <div id="cap-claim" hidden style="padding:0 14px 4px">
+      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
+        <span class="lbl">ЭТО</span>
+        ${['факт', 'решение', 'правило', 'наблюдение', 'договорённость', 'намерение'].map((t, i) =>
+          `<button class="chip${i === 0 ? ' on' : ''}" data-ctype="${t}">${t.toUpperCase()}</button>`).join('')}
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <label style="flex:1"><span class="lbl">О ЧЁМ / О КОМ</span><input id="cap-about" placeholder="начни печатать имя…" spellcheck="false" autocomplete="off"></label>
+        <label style="width:130px"><span class="lbl">КОГДА</span><input id="cap-when" spellcheck="false"></label>
+      </div>
+      <div id="cap-hits" style="display:flex;gap:5px;flex-wrap:wrap;margin-top:7px"></div>
+    </div>
     <div class="ft"><button class="btn-amber" style="margin:0" id="cap-save">ЗАПИСАТЬ [CTRL+ENTER]</button>
-    <button class="btn-line" id="cap-cancel">ОТМЕНА</button><span class="note">в раздел «${DAILY_THOUGHTS}» · файл дня создастся сам</span></div></div>`;
+    <button class="btn-line" id="cap-toclaim">ЭТО УТВЕРЖДЕНИЕ</button>
+    <button class="btn-line" id="cap-cancel">ОТМЕНА</button><span class="note" id="cap-note">в раздел «${DAILY_THOUGHTS}» · файл дня создастся сам</span></div></div>`;
   const ta = $('#cap-ta', wrap);
   // prefill приходит из «поделиться» на телефоне: текст уже набран в другом
   // приложении, и переписывать его руками — ровно та работа, ради отсутствия
@@ -1865,6 +1878,16 @@ export function initCapture() {
   async function save() {
     const text = ta.value.trim(); if (!text) return close();
     const btn = $('#cap-save', wrap); btn.textContent = 'ЗАПИСЫВАЮ…';
+    if (claimMode) {
+      if (!ent) { btn.textContent = 'ЗАПИСАТЬ [CTRL+ENTER]'; return toast('ВЫБЕРИ СУЩНОСТЬ ИЗ СПИСКА — БЕЗ ЯКОРЯ УТВЕРЖДЕНИЕ ПОТЕРЯЕТСЯ', 'warn', 5000); }
+      try {
+        const path = await saveClaim({ text, тип, о: ent, когда: $('#cap-when', wrap).value.trim() || ymd() });
+        ta.value = ''; setMode(false); close();
+        toast(`УТВЕРЖДЕНИЕ В ПАМЯТИ → ${path.replace(/^осколки\//, '').toUpperCase()}`);
+      } catch (e) { toast(`НЕ ЗАПИСАЛОСЬ: ${e.message}`, 'err', 7000); }
+      finally { btn.textContent = 'ЗАПИСАТЬ [CTRL+ENTER]'; }
+      return;
+    }
     try {
       const { path, mode, queued } = await appendThought(text);
       ta.value = ''; close();
@@ -1876,6 +1899,54 @@ export function initCapture() {
       toast(`НЕ ЗАПИСАЛОСЬ: ${e.message}`, 'err', 7000);
     } finally { btn.textContent = 'ЗАПИСАТЬ [CTRL+ENTER]'; }
   }
+  /* Мысль сразу утверждением.
+
+     Обычный путь — мысль в дневник, дневник в улики, улики в разбор — занимает
+     сутки. Для наблюдения это нормально, для решения нет: пока оно едет по
+     конвейеру, на него уже опираются, а в памяти его ещё нет. Кнопка убирает
+     весь цикл: тот же текст уходит осколком с датой, типом и якорем.
+
+     Сущность выбирается из уже существующих: завести новую отсюда нельзя, иначе
+     через месяц рядом с «Ксюшей» появится «Ксения», и память разорвётся надвое
+     незаметно. */
+  let claimMode = false, тип = 'факт', ent = null;
+  const claimBox = $('#cap-claim', wrap);
+  const setMode = on => {
+    claimMode = on;
+    claimBox.hidden = !on;
+    $('#cap-toclaim', wrap).classList.toggle('on', on);
+    $('#cap-toclaim', wrap).textContent = on ? '← ПРОСТО МЫСЛЬ' : 'ЭТО УТВЕРЖДЕНИЕ';
+    $('#cap-note', wrap).textContent = on
+      ? 'уйдёт осколком в «осколки/» — сразу в память, минуя дневник'
+      : `в раздел «${DAILY_THOUGHTS}» · файл дня создастся сам`;
+    if (on) {
+      $('#cap-when', wrap).value = ymd();
+      $('#cap-about', wrap).focus();
+    } else ta.focus();
+  };
+  $('#cap-toclaim', wrap).addEventListener('click', () => setMode(!claimMode));
+  claimBox.querySelectorAll('[data-ctype]').forEach(b => b.addEventListener('click', () => {
+    claimBox.querySelectorAll('[data-ctype]').forEach(x => x.classList.toggle('on', x === b));
+    тип = b.dataset.ctype;
+  }));
+  const hits = $('#cap-hits', wrap);
+  $('#cap-about', wrap).addEventListener('input', e => {
+    const q = e.target.value.trim().toLowerCase();
+    ent = null;
+    if (q.length < 2) { hits.innerHTML = ''; return; }
+    const found = corpus.notes
+      .filter(n => n.klass === 'сущность')
+      .filter(n => (n.title + ' ' + n.base + ' ' + (n.aliases || []).join(' ')).toLowerCase().includes(q))
+      .slice(0, 6);
+    hits.innerHTML = found.map(n => `<button class="chip" data-ent="${escA(n.base)}">${escA(n.title)}</button>`).join('')
+      || '<span style="font-size:10px;color:var(--dim)">такой сущности нет — заводится руками на экране заметки</span>';
+    hits.querySelectorAll('[data-ent]').forEach(b => b.addEventListener('click', () => {
+      ent = b.dataset.ent;
+      hits.querySelectorAll('[data-ent]').forEach(x => x.classList.toggle('on', x === b));
+      $('#cap-about', wrap).value = b.textContent;
+    }));
+  });
+
   $('#cap-save', wrap).addEventListener('click', save);
   $('#cap-cancel', wrap).addEventListener('click', close);
   wrap.addEventListener('click', e => { if (e.target === wrap) close(); });
