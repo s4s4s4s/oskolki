@@ -1,7 +1,7 @@
 // Точка входа: загрузка, роутер, верхняя/нижняя полосы, живой канал, клавиатура.
 import { getSettings, saveSettings, clearSettings, initTransport, liveChannel, transport, IS_NATIVE } from './api.js';
 import { fetchIndex, modelFrom, applyModel, corpus } from './corpus.js';
-import { renderConnect, renderGraph, renderNote, renderCards, renderSearch, renderAsk, renderHealth, initCapture, initNoteCreator, initPalette, toast, notePush, $ } from './views.js';
+import { renderConnect, renderGraph, renderNote, renderCards, renderSearch, renderAsk, renderHealth, renderTriage, renderTimeline, renderPeople, initCapture, initNoteCreator, initPalette, toast, notePush, $ } from './views.js';
 import { IS_APP, INDEX_REBUILD_MS } from './config.js';
 import { loadIndexCache, saveIndexCache } from './store.js';
 import { flushQueue, pendingWrites } from './write.js';
@@ -47,6 +47,18 @@ function route() {
     drawStrip('');
     renderHealth(view);
     setBar('ЧТО НАКОПИЛОСЬ И ТРЕБУЕТ РУКИ&nbsp;&nbsp;&nbsp;КЛИК — ОТКРЫТЬ ЗАМЕТКУ');
+  } else if (name === 'triage') {
+    drawStrip('');
+    renderTriage(view);
+    setBar('РАЗБОР ПО ОДНОЙ&nbsp;&nbsp;&nbsp;1…9 — ТЕГ ИЗ ПРЕДЛОЖЕННЫХ&nbsp;&nbsp;&nbsp;T — ОТЛОЖИТЬ');
+  } else if (name === 'time') {
+    drawStrip('');
+    renderTimeline(view);
+    setBar('ЛЕНТА ПО ДАТЕ ПОСЛЕДНЕЙ ПРАВКИ&nbsp;&nbsp;&nbsp;СТОЛБИК — ПЕРЕЙТИ К МЕСЯЦУ');
+  } else if (name === 'people') {
+    drawStrip('');
+    renderPeople(view);
+    setBar('ЛЮДИ ПО ПОСЛЕДНЕМУ УПОМИНАНИЮ&nbsp;&nbsp;&nbsp;КЛИК — ОТКРЫТЬ ЗАМЕТКУ');
   } else if (name === 'ask') {
     drawStrip('ask');
     const q = new URLSearchParams(rest.split('?')[1] || h.split('?')[1] || '').get('q') || '';

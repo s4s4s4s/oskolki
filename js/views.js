@@ -7,7 +7,7 @@ import { splitFrontmatter, parseSections, renderMd, fmtBytes, fmtAge, plural } f
 import { GraphView } from './graph.js';
 import { DEFAULT_URL, DAILY_THOUGHTS, MODEL } from './config.js';
 import { buildContext, packForChat, askClaude, getAiSettings, saveAiSettings, forgetKey, mcpConfig, MODES } from './ai.js';
-import { appendThought, dailyPath, createNote, safeFileName, addSection, patchSection, TEMPLATES, toggleTag, linkTo, unlinkFrom, renameTag } from './write.js';
+import { appendThought, dailyPath, createNote, safeFileName, addSection, patchSection, TEMPLATES, toggleTag, linkTo, unlinkFrom, renameTag, setNoteField } from './write.js';
 import { LINK_TYPES, TYPE_OF_FIELD, FIELD_OF_TYPE } from './frontmatter.js';
 import { parseQuery, filterNotes, matches, hasFilters, describe, FIELDS } from './query.js';
 import { diffLines, collapseSame } from './diff.js';
@@ -629,7 +629,7 @@ function newSection(root, path, reload) {
 }
 
 /* ── картотека ───────────────────────────────────────────── */
-const cardState = { sort: 'fresh', view: 'table', q: '', tag: '' };
+const cardState = { sort: 'fresh', view: 'table', q: '', tag: '', sel: new Set(), anchor: null };
 export function renderCards(root, tag) {
   cardState.tag = tag || '';
   root.innerHTML = `<div class="cards-wrap">
@@ -646,6 +646,7 @@ export function renderCards(root, tag) {
       <button class="chip" id="k-tags-all" title="все теги вальта">ТЕГИ ${corpus.tagCounts.size}</button>
       <input id="k-q" placeholder="фильтр…" spellcheck="false" value="${escA(cardState.q)}">
     </div>
+    <div class="masspanel" id="k-mass" hidden></div>
     <div class="cards-body" id="k-body"></div></div>`;
 
   const zbox = $('#k-zones', root);
@@ -674,7 +675,7 @@ export function renderCards(root, tag) {
   }
   // Разметка одной строки таблицы вынесена: её рисует и обычный проход,
   // и виртуализация.
-  const rowHtml = n => `<div class="trow" data-p="${escA(n.path)}"><span class="nm">${n.title}</span>
+  const rowHtml = n => `<div class="trow${cardState.sel.has(n.path) ? ' picked' : ''}" data-p="${escA(n.path)}"><span class="nm">${n.title}</span>
     <span class="zone-tag" style="color:${n.zoneRef.color}" title="${escA(n.zone)}">■ ${zn(n)}</span>
     <span>${fmtAge(n.meta.h).toUpperCase()}</span><span>${fmtBytes(n.meta.b)}</span><span>${n.deg}</span><span>${n.meta.c}</span></div>`;
   const HEAD = `<div class="trow head"><span>ИМЯ</span><span>ЗОНА</span><span>ПРАВКА</span><span>РАЗМЕР</span><span>СВЯЗИ</span><span>КОММИТЫ</span></div>`;
@@ -696,7 +697,7 @@ export function renderCards(root, tag) {
       const slice = list.slice(start, start + count);
       win.style.transform = `translateY(${start * ROW_H}px)`;
       win.innerHTML = slice.map(rowHtml).join('');
-      win.querySelectorAll('[data-p]').forEach(r => r.addEventListener('click', () => { location.hash = `#/note/${encodeURIComponent(r.dataset.p)}`; }));
+      wireRows(win, list);
     };
     body.onscroll = paint;
     paint();
@@ -718,8 +719,65 @@ export function renderCards(root, tag) {
         <span class="zone-tag" style="color:${n.zoneRef.color};font-size:9px" title="${escA(n.zone)}">■ ${zn(n)}</span>
         <div class="nm">${n.title}</div><div class="mt">правка ${fmtAge(n.meta.h)} · ${fmtBytes(n.meta.b)}<br>${n.deg} ${plural(n.deg, 'связь', 'связи', 'связей')} · ${n.meta.c} ${plural(n.meta.c, 'коммит', 'коммита', 'коммитов')}</div></div>`).join('') + '</div>';
     }
-    body.querySelectorAll('[data-p]').forEach(r => r.addEventListener('click', () => { location.hash = `#/note/${encodeURIComponent(r.dataset.p)}`; }));
+    wireRows(body, list);
     $('.strip .info#top-count') && ($('.strip .info#top-count').textContent = `${corpus.notes.length} ЗАМЕТОК · ПОКАЗАНО ${list.length}`);
+  }
+
+  /* Выделение. Обычный клик открывает заметку — так было и так остаётся, иначе
+     картотека перестанет быть картотекой ради редкой операции. Ctrl добавляет
+     в набор, Shift берёт всё от прошлой отметки до текущей: так же, как в любом
+     файловом менеджере, где эту механику уже знают руки. */
+  const paintSel = () => {
+    root.querySelectorAll('[data-p]').forEach(r => r.classList.toggle('picked', cardState.sel.has(r.dataset.p)));
+    drawMass();
+  };
+  function wireRows(box, list) {
+    box.querySelectorAll('[data-p]').forEach(r => r.addEventListener('click', e => {
+      const p = r.dataset.p;
+      if (e.ctrlKey || e.metaKey) {
+        cardState.sel.has(p) ? cardState.sel.delete(p) : cardState.sel.add(p);
+        cardState.anchor = p; paintSel(); return;
+      }
+      if (e.shiftKey && cardState.anchor) {
+        const paths = list.map(n => n.path);
+        const a = paths.indexOf(cardState.anchor), b = paths.indexOf(p);
+        if (a >= 0 && b >= 0) { for (let i = Math.min(a, b); i <= Math.max(a, b); i++) cardState.sel.add(paths[i]); }
+        paintSel(); return;
+      }
+      location.hash = `#/note/${encodeURIComponent(p)}`;
+    }));
+  }
+  function drawMass() {
+    const box = $('#k-mass', root), n = cardState.sel.size;
+    box.hidden = !n;
+    if (!n) return;
+    box.innerHTML = `<b>ВЫБРАНО ${n}</b>
+      <button class="chip" data-m="tag">＋ ТЕГ</button>
+      <button class="chip" data-m="untag">− ТЕГ</button>
+      <button class="chip" data-m="link">СВЯЗАТЬ С…</button>
+      <button class="chip" data-m="field">ПОЛЕ…</button>
+      <button class="chip" data-m="copy">СКОПИРОВАТЬ СПИСОК</button>
+      <button class="chip" data-m="ask">СПРОСИТЬ ПО НИМ</button>
+      <span class="sp"></span>
+      <button class="chip" data-m="all">ВЫБРАТЬ ВСЁ ПОКАЗАННОЕ</button>
+      <button class="chip" data-m="none">СНЯТЬ ВЫДЕЛЕНИЕ</button>`;
+    const picked = () => [...cardState.sel];
+    box.querySelectorAll('[data-m]').forEach(b => b.addEventListener('click', () => {
+      const m = b.dataset.m;
+      if (m === 'none') { cardState.sel.clear(); paintSel(); return; }
+      if (m === 'all') { rows().forEach(x => cardState.sel.add(x.path)); paintSel(); return; }
+      if (m === 'copy') {
+        const text = picked().map(p => `- [[${corpus.byPath.get(p)?.title || p.replace(/\.md$/, '')}]]`).join('\n');
+        navigator.clipboard.writeText(text).then(() => toast(`СКОПИРОВАНО ${cardState.sel.size} ССЫЛОК — ВСТАВЬТЕ В ЛЮБУЮ ЗАМЕТКУ`),
+          () => toast('БУФЕР НЕДОСТУПЕН', 'err'));
+        return;
+      }
+      if (m === 'ask') {
+        location.hash = `#/ask?q=${encodeURIComponent(picked().map(p => corpus.byPath.get(p)?.title || p).join(', ') + ' — что общего и что из этого следует?')}`;
+        return;
+      }
+      massOp(m, picked(), () => { cardState.sel.clear(); paintSel(); draw(); });
+    }));
   }
   root.querySelectorAll('[data-s]').forEach(b => b.addEventListener('click', () => { cardState.sort = b.dataset.s; draw(); }));
   root.querySelectorAll('[data-v]').forEach(b => b.addEventListener('click', () => { cardState.view = b.dataset.v; draw(); }));
@@ -727,6 +785,75 @@ export function renderCards(root, tag) {
   $('#k-tags-all', root)?.addEventListener('click', () => showAllTags());
   $('#k-q', root).addEventListener('input', e => { cardState.q = e.target.value; draw(); });
   drawZones(); draw();
+}
+
+/* Массовая операция над выбранными заметками.
+
+   Пишем строго по одной и последовательно: воркер ходит в GitHub Contents API,
+   а тот на параллельных записях в один репозиторий отвечает конфликтами. Живая
+   строка прогресса нужна не для красоты — на полусотне файлов это полминуты, и
+   человек должен видеть, что происходит, и на чём именно споткнулось.
+
+   Ошибка одной заметки не отменяет остальные: список несделанного показывается
+   в конце, повторить можно по тому же набору. */
+function massOp(kind, paths, done) {
+  const wrap = $('#modal');
+  const titles = paths.map(p => corpus.byPath.get(p)?.title || p);
+  const forms = {
+    tag: { hd: 'ДОБАВИТЬ ТЕГ', lbl: 'ТЕГ (МОЖНО ВЛОЖЕННЫЙ: ПРОЕКТ/ЕРЕВАН)', ph: 'проект/ереван', ok: 'ПОСТАВИТЬ ВСЕМ' },
+    untag: { hd: 'СНЯТЬ ТЕГ', lbl: 'КАКОЙ ТЕГ СНЯТЬ', ph: 'черновик', ok: 'СНЯТЬ СО ВСЕХ' },
+    link: { hd: 'СВЯЗАТЬ С ЗАМЕТКОЙ', lbl: 'ИМЯ ЗАМЕТКИ, С КОТОРОЙ СВЯЗАТЬ', ph: 'Студия Полякова', ok: 'СВЯЗАТЬ ВСЕ' },
+    field: { hd: 'ПОСТАВИТЬ ПОЛЕ', lbl: 'ПОЛЕ И ЗНАЧЕНИЕ ЧЕРЕЗ ДВОЕТОЧИЕ', ph: 'status: done', ok: 'ПРОСТАВИТЬ ВСЕМ' },
+  };
+  const f = forms[kind];
+  const suggest = kind === 'tag' || kind === 'untag'
+    ? [...corpus.tagCounts].slice(0, 12).map(([t]) => t)
+    : kind === 'link' ? corpus.notes.filter(n => n.deg > 2).slice(0, 10).map(n => n.title) : ['status: done', 'status: активно', 'type: note'];
+
+  wrap.innerHTML = `<div class="cap" style="width:600px"><div class="hd">${f.hd} · ${paths.length} ${plural(paths.length, 'ЗАМЕТКА', 'ЗАМЕТКИ', 'ЗАМЕТОК')}<span>ESC — ЗАКРЫТЬ</span></div>
+    <div class="row"><label style="flex:1"><span class="lbl">${f.lbl}</span><input id="mo-in" placeholder="${escA(f.ph)}" spellcheck="false"></label></div>
+    ${kind === 'link' ? `<div class="row" style="padding-top:0"><label style="flex:1"><span class="lbl">ТИП СВЯЗИ</span>
+      <select id="mo-field">${LINK_TYPES.map(t => `<option value="${t.key}">${t.label}</option>`).join('')}</select></label></div>` : ''}
+    <div class="hint-row" style="display:flex;gap:5px;flex-wrap:wrap">${suggest.map(s => `<button class="chip" data-sg="${escA(s)}">${escA(s)}</button>`).join('')}</div>
+    <div class="ask-ctx" style="max-height:26vh;overflow:auto;margin:6px 14px;font-size:10px;color:var(--mid)">${titles.map(t => `<div>${escA(t)}</div>`).join('')}</div>
+    <div class="search-stats" id="mo-progress" style="padding:0 14px"></div>
+    <div class="ft"><button class="btn-amber" style="margin:0" id="mo-ok">${f.ok}</button><button class="btn-line" id="mo-no">ОТМЕНА</button></div></div>`;
+  const close = () => { wrap.classList.remove('open'); document.activeElement?.blur(); };
+  const input = $('#mo-in', wrap), progress = $('#mo-progress', wrap);
+  setTimeout(() => input.focus(), 30);
+  wrap.querySelectorAll('[data-sg]').forEach(b => b.addEventListener('click', () => { input.value = b.dataset.sg; input.focus(); }));
+  $('#mo-no', wrap).addEventListener('click', close);
+  $('#mo-ok', wrap).addEventListener('click', async () => {
+    const v = input.value.trim();
+    if (!v) return toast('ПУСТОЕ ЗНАЧЕНИЕ', 'warn');
+    let key = v, value = '';
+    if (kind === 'field') {
+      const m = v.match(/^([\wА-Яа-яЁё-]+)\s*[:=]\s*(.+)$/);
+      if (!m) return toast('НУЖНО «ПОЛЕ: ЗНАЧЕНИЕ»', 'warn');
+      key = m[1]; value = m[2];
+    }
+    const btn = $('#mo-ok', wrap); btn.disabled = true; btn.textContent = 'ПИШУ…';
+    const failed = [];
+    for (let i = 0; i < paths.length; i++) {
+      const p = paths[i];
+      progress.textContent = `${i + 1} / ${paths.length} · ${corpus.byPath.get(p)?.title || p}`;
+      try {
+        if (kind === 'tag') await toggleTag(p, key.replace(/^#/, ''), true);
+        else if (kind === 'untag') await toggleTag(p, key.replace(/^#/, ''), false);
+        else if (kind === 'link') await linkTo(p, $('#mo-field', wrap).value, key);
+        else await setNoteField(p, key, value);
+      } catch (e) { failed.push(`${corpus.byPath.get(p)?.title || p}: ${e.message}`); }
+    }
+    progress.innerHTML = failed.length
+      ? `<span style="color:var(--red)">НЕ ВЫШЛО У ${failed.length}:</span><br>${failed.slice(0, 6).map(escA).join('<br>')}`
+      : '';
+    toast(`ГОТОВО: ${paths.length - failed.length} ИЗ ${paths.length}${failed.length ? ` · ОШИБОК ${failed.length}` : ''}`, failed.length ? 'warn' : '', 6000);
+    btn.disabled = false; btn.textContent = f.ok;
+    if (!failed.length) { close(); done(); }
+  });
+  wrap.classList.add('open');
+  wrap.addEventListener('keydown', e => { if (e.key === 'Escape') { e.stopPropagation(); close(); } });
+  wrap.addEventListener('click', e => { if (e.target === wrap) close(); });
 }
 
 /* Все теги вальта разом: с чего начинается наведение порядка. Отсюда же
@@ -1069,6 +1196,9 @@ export function initPalette() {
     { label: 'Новая заметка', hint: 'C', run: () => document.getElementById('btn-new').click() },
     { label: 'Спросить память', hint: '', run: () => { location.hash = '#/ask'; } },
     { label: 'Здоровье вальта', hint: 'сироты, битые, застой', run: () => { location.hash = '#/health'; } },
+    { label: 'Разбор', hint: 'неразмеченное по одной', run: () => { location.hash = '#/triage'; } },
+    { label: 'Лента', hint: 'по времени правок', run: () => { location.hash = '#/time'; } },
+    { label: 'Люди', hint: 'кто и где упоминается', run: () => { location.hash = '#/people'; } },
     { label: 'Все теги', hint: 'переименование и слияние', run: () => showAllTags() },
     { label: 'Карта', hint: 'G', run: () => { location.hash = '#/graph'; } },
     { label: 'Картотека', hint: 'K', run: () => { location.hash = '#/cards'; } },
@@ -1161,6 +1291,217 @@ export function renderHealth(root) {
 
   root.querySelectorAll('[data-p]').forEach(r => r.addEventListener('click', () => { location.hash = `#/note/${encodeURIComponent(r.dataset.p)}`; }));
   root.querySelectorAll('[data-tag]').forEach(b => b.addEventListener('click', () => { location.hash = `#/cards?tag=${encodeURIComponent(b.dataset.tag)}`; }));
+}
+
+/* ── разбор ──────────────────────────────────────────────────────────────────
+   Заметка, которую записали и не связали ни с чем, через месяц не существует:
+   найти её можно только точным словом, а вспомнить это слово нечем. Здесь такие
+   заметки идут по одной, и на каждую есть готовые предложения — теги соседей и
+   похожие заметки, — чтобы разбор стоил два нажатия, а не десять.
+
+   «Отложить» живёт в localStorage, а не в вальте: это состояние головы, а не
+   знание. Незачем засорять фронтматтер служебными флагами. */
+const SKIP_KEY = 'shards.triage.skip';
+const skipSet = () => { try { return new Set(JSON.parse(localStorage.getItem(SKIP_KEY)) || []); } catch { return new Set(); } };
+const skipAdd = p => { const s = skipSet(); s.add(p); localStorage.setItem(SKIP_KEY, JSON.stringify([...s])); };
+
+export async function renderTriage(root) {
+  const skip = skipSet();
+  const queue = corpus.notes
+    .filter(n => isVisible(n) && !n.zoneRef?.chronicle && !skip.has(n.path)
+      && (!n.tags?.length || (!n.links.length && !n.backlinks?.length)))
+    .sort((a, b) => new Date(b.meta.h || 0) - new Date(a.meta.h || 0));
+
+  root.innerHTML = `<div class="cards-wrap">
+    <div class="toolbar"><span class="lbl">РАЗБОР</span>
+      <span style="font-size:10px;color:var(--mid)" id="tr-count"></span>
+      <span class="sp"></span>
+      <button class="chip" id="tr-clearskip" title="вернуть отложенные в очередь">ОТЛОЖЕНО ${skip.size}</button>
+      <span style="font-size:10px;color:var(--dim)">T — следующая · 1…9 — поставить предложенный тег</span></div>
+    <div class="cards-body" id="tr-body"></div></div>`;
+
+  $('#tr-clearskip', root).addEventListener('click', () => { localStorage.removeItem(SKIP_KEY); renderTriage(root); });
+
+  let at = 0;
+  const body = $('#tr-body', root);
+  const step = async () => {
+    const note = queue[at];
+    $('#tr-count', root).textContent = queue.length ? `${at + 1} из ${queue.length} без тегов или без связей` : 'очередь пуста';
+    if (!note) {
+      body.innerHTML = `<div class="splash" style="position:static;padding:80px 0"><span class="gem"></span>
+        <span class="st">РАЗБИРАТЬ НЕЧЕГО — ВСЁ СВЯЗАНО И РАЗМЕЧЕНО</span></div>`;
+      return;
+    }
+    body.innerHTML = `<div class="triage">
+      <div class="tr-card">
+        <div class="note-meta"><span style="color:${note.zoneRef.color}">■ ${zn(note)}</span>
+          <span>ПРАВКА ${fmtAge(note.meta.h).toUpperCase()}</span><span>${fmtBytes(note.meta.b)}</span>
+          <span>${note.tags?.length ? '' : 'БЕЗ ТЕГОВ'} ${note.links.length + (note.backlinks?.length || 0) ? '' : '· БЕЗ СВЯЗЕЙ'}</span></div>
+        <h1 class="note-title">${note.title}</h1>
+        <div class="md" id="tr-text" style="max-height:34vh;overflow:auto">читаю…</div>
+        <div class="tr-acts">
+          <button class="btn-amber" id="tr-apply" style="margin:0">ПРИМЕНИТЬ ВЫБРАННОЕ</button>
+          <button class="btn-line" id="tr-skip">ОТЛОЖИТЬ [T]</button>
+          <button class="btn-line" id="tr-open">ОТКРЫТЬ ЦЕЛИКОМ</button>
+        </div>
+      </div>
+      <div class="tr-side">
+        <div class="panel"><div class="hd">ТЕГИ ПО СОСЕДЯМ</div><div id="tr-tags" style="display:flex;gap:5px;flex-wrap:wrap;padding:10px 12px">считаю…</div></div>
+        <div class="panel"><div class="hd">СВЯЗАТЬ С ПОХОЖИМИ</div><div class="rail-rows" id="tr-links"></div></div>
+      </div></div>`;
+
+    $('#tr-skip', root).addEventListener('click', () => { skipAdd(note.path); at++; step(); });
+    $('#tr-open', root).addEventListener('click', () => openNote(note));
+
+    textOf(note).then(raw => {
+      const { body: b } = splitFrontmatter(raw);
+      $('#tr-text', root).innerHTML = renderMd(b.slice(0, 1200)) + (b.length > 1200 ? '<p style="color:var(--dim)">…</p>' : '');
+    }).catch(() => { $('#tr-text', root).textContent = 'текст недоступен'; });
+
+    // Предложения берём у похожих заметок: если пять соседей по смыслу помечены
+    // #переезд, то и эта скорее всего про переезд. Это дешевле любой модели.
+    const sim = await similarTo(note, 8).catch(() => []);
+    const freq = new Map();
+    for (const { note: o, score } of sim) for (const t of o.tags || []) freq.set(t, (freq.get(t) || 0) + score);
+    const picks = [...freq].sort((a, b) => b[1] - a[1]).slice(0, 9).map(x => x[0]);
+    const chosen = new Set();
+    const tagBox = $('#tr-tags', root);
+    tagBox.innerHTML = picks.length
+      ? picks.map((t, i) => `<button class="chip" data-t="${escA(t)}">${i + 1} · #${escA(t)}</button>`).join('')
+        + '<button class="chip" data-t-new title="свой тег">＋ СВОЙ</button>'
+      : '<span style="font-size:10px;color:var(--dim)">соседи ничем не помечены — поставьте тег руками на экране заметки</span>';
+    const toggle = t => {
+      chosen.has(t) ? chosen.delete(t) : chosen.add(t);
+      tagBox.querySelectorAll('[data-t]').forEach(b => b.classList.toggle('on', chosen.has(b.dataset.t)));
+    };
+    tagBox.querySelectorAll('[data-t]').forEach(b => b.addEventListener('click', () => toggle(b.dataset.t)));
+    $('[data-t-new]', tagBox)?.addEventListener('click', () => askTag(note.path, () => step()));
+
+    const linkBox = $('#tr-links', root);
+    const linked = new Set();
+    linkBox.innerHTML = sim.slice(0, 6).map(({ note: o }) => `<div data-l="${escA(o.title)}">${zoneDot(o.zoneRef)}<span class="nm">${o.title}</span><span class="zn">СВЯЗАТЬ</span></div>`).join('')
+      || '<div style="cursor:default;color:var(--dim);font-size:10px">похожих не нашлось</div>';
+    linkBox.querySelectorAll('[data-l]').forEach(r => r.addEventListener('click', () => {
+      const t = r.dataset.l;
+      linked.has(t) ? linked.delete(t) : linked.add(t);
+      r.classList.toggle('picked', linked.has(t));
+      $('.zn', r).textContent = linked.has(t) ? 'ВЫБРАНО' : 'СВЯЗАТЬ';
+    }));
+
+    root.onkeydown = e => {
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+      if (e.key === 't' || e.key === 'е') { skipAdd(note.path); at++; step(); }
+      const i = +e.key;
+      if (i >= 1 && i <= picks.length) toggle(picks[i - 1]);
+    };
+
+    $('#tr-apply', root).addEventListener('click', async () => {
+      if (!chosen.size && !linked.size) return toast('НИЧЕГО НЕ ВЫБРАНО', 'warn');
+      const btn = $('#tr-apply', root); btn.disabled = true; btn.textContent = 'ПИШУ…';
+      const errs = [];
+      for (const t of chosen) try { await toggleTag(note.path, t, true); } catch (e) { errs.push(e.message); }
+      for (const t of linked) try { await linkTo(note.path, 'relates', t); } catch (e) { errs.push(e.message); }
+      toast(errs.length ? `ЧАСТИЧНО: ${errs[0]}` : `РАЗОБРАНО: ${note.title}`, errs.length ? 'warn' : '');
+      at++; step();
+    });
+  };
+  step();
+}
+
+/* ── лента ───────────────────────────────────────────────────────────────────
+   Память имеет время: «что я делал в июле» — вопрос не хуже «что я думал про
+   Ереван». Лента строится по дате последней правки из git, поэтому показывает
+   не когда файл создан, а когда к нему возвращались. */
+export function renderTimeline(root) {
+  /* Дата берётся не только из git. Вальт переехал в репозиторий разом, поэтому
+     по коммитам почти всё лежит в одном месяце — лента из двух столбиков.
+     Если в имени или пути есть дата (daily/2026-07-16, «Разбор PT4 — 2026-07-23»),
+     она вернее: это дата события, а не дата, когда файл положили в git. */
+  const dateOf = n => {
+    const m = (n.path + ' ' + n.title).match(/(20\d{2})-(\d{2})-(\d{2})/);
+    if (m) { const d = new Date(+m[1], +m[2] - 1, +m[3]); if (!isNaN(d)) return d; }
+    return n.meta.h ? new Date(n.meta.h) : null;
+  };
+  const notes = corpus.notes.filter(n => isVisible(n) && dateOf(n));
+  const when = new Map(notes.map(n => [n, dateOf(n)]));
+
+  /* Шаг ленты подбирается под возраст вальта. Вальту два месяца — по месяцам это
+     два столбика, и смотреть не на что; станет два года — по дням это семьсот
+     заголовков. Порог по размаху дат, а не по числу заметок. */
+  const stamps = [...when.values()].map(d => d.getTime());
+  const spanDays = (Math.max(...stamps) - Math.min(...stamps)) / 864e5;
+  const step = spanDays <= 120 ? 'day' : spanDays <= 3 * 365 ? 'month' : 'year';
+  const pad = x => String(x).padStart(2, '0');
+  const keyOf = d => step === 'day' ? `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+    : step === 'month' ? `${d.getFullYear()}-${pad(d.getMonth() + 1)}` : `${d.getFullYear()}`;
+  const MONTH = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'];
+  const label = key => {
+    const [y, m, d] = key.split('-');
+    if (step === 'year') return y;
+    if (step === 'month') return `${MONTH[+m - 1].toUpperCase()} ${y}`;
+    return `${+d} ${MONTH[+m - 1].toUpperCase()} ${y}`;
+  };
+  const byMonth = new Map();
+  for (const n of notes) {
+    const key = keyOf(when.get(n));
+    if (!byMonth.has(key)) byMonth.set(key, []);
+    byMonth.get(key).push(n);
+  }
+  const months = [...byMonth.entries()].sort((a, b) => b[0].localeCompare(a[0]));
+  const peak = Math.max(...months.map(([, l]) => l.length), 1);
+
+  root.innerHTML = `<div class="cards-wrap">
+    <div class="toolbar"><span class="lbl">ЛЕНТА</span>
+      <span style="font-size:10px;color:var(--mid)">${notes.length} ${plural(notes.length, 'заметка', 'заметки', 'заметок')} · ${months.length} ${step === 'day' ? plural(months.length, 'день', 'дня', 'дней') : step === 'month' ? plural(months.length, 'месяц', 'месяца', 'месяцев') : plural(months.length, 'год', 'года', 'лет')} · дата из имени, иначе последняя правка</span>
+      <span class="sp"></span><span style="font-size:10px;color:var(--dim)">клик по столбику — перейти</span></div>
+    <div class="cards-body">
+      <div class="tl-bars">${months.slice().reverse().map(([k, l]) => `<span class="tl-bar" data-go="${k}" title="${label(k)} · ${l.length}">
+        <i style="height:${Math.max(3, l.length / peak * 100)}%"></i></span>`).join('')}</div>
+      ${months.map(([k, l]) => `<div class="tl-month" id="m-${k}">
+        <div class="tl-hd">${label(k)}<span>${l.length} ${plural(l.length, 'ЗАМЕТКА', 'ЗАМЕТКИ', 'ЗАМЕТОК')}</span></div>
+        <div class="rail-rows">${l.sort((a, b) => when.get(b) - when.get(a)).map(n => `
+          <div data-p="${escA(n.path)}">${zoneDot(n.zoneRef)}<span class="nm">${n.title}</span>
+            <span class="zn">${when.get(n).toLocaleDateString('ru', { day: 'numeric', month: 'short' })}</span></div>`).join('')}</div>
+      </div>`).join('')}
+    </div></div>`;
+  root.querySelectorAll('[data-p]').forEach(r => r.addEventListener('click', () => { location.hash = `#/note/${encodeURIComponent(r.dataset.p)}`; }));
+  root.querySelectorAll('[data-go]').forEach(b => b.addEventListener('click', () => {
+    $(`#m-${b.dataset.go}`, root)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }));
+}
+
+/* ── люди ────────────────────────────────────────────────────────────────────
+   Отдельный экран, потому что люди — единственный тип заметок, который важен
+   не содержимым, а тем, где ещё они всплывают: с кем связано, когда последний
+   раз упоминался, в каких проектах. */
+export function renderPeople(root) {
+  const people = corpus.notes.filter(n => n.type === 'person')
+    .map(n => {
+      const mentions = n.backlinks || [];
+      const last = mentions.map(m => m.from.meta.h).filter(Boolean).sort().pop() || n.meta.h;
+      return { n, mentions, last };
+    })
+    .sort((a, b) => new Date(b.last || 0) - new Date(a.last || 0));
+
+  root.innerHTML = `<div class="cards-wrap">
+    <div class="toolbar"><span class="lbl">ЛЮДИ</span>
+      <span style="font-size:10px;color:var(--mid)">${people.length} ${plural(people.length, 'человек', 'человека', 'человек')} · по последнему упоминанию</span>
+      <span class="sp"></span><input id="pp-q" placeholder="имя…" spellcheck="false"></div>
+    <div class="cards-body"><div class="grid-cards" id="pp-list"></div></div></div>`;
+
+  const draw = (q = '') => {
+    $('#pp-list', root).innerHTML = people
+      .filter(({ n }) => !q || n.title.toLowerCase().includes(q))
+      .map(({ n, mentions, last }) => `<div class="gcard" data-p="${escA(n.path)}">
+        <span class="zone-tag" style="color:${n.zoneRef.color};font-size:9px">■ ${zn(n)}</span>
+        <div class="nm">${n.title}</div>
+        <div class="mt">упоминаний ${mentions.length} · последнее ${fmtAge(last)}<br>${(n.tags || []).slice(0, 4).map(t => '#' + t).join(' ') || 'без тегов'}</div>
+        <div class="mt" style="color:var(--mid);margin-top:6px">${mentions.slice(0, 3).map(m => escA(m.from.title)).join(' · ') || 'нигде не упоминается'}</div>
+      </div>`).join('') || '<div style="color:var(--dim);font-size:11px;padding:14px">никого с type: person — поставьте тип в заметке человека</div>';
+    $('#pp-list', root).querySelectorAll('[data-p]').forEach(r => r.addEventListener('click', () => { location.hash = `#/note/${encodeURIComponent(r.dataset.p)}`; }));
+  };
+  $('#pp-q', root).addEventListener('input', e => draw(e.target.value.trim().toLowerCase()));
+  draw();
 }
 
 /* ── быстрая мысль ───────────────────────────────────────── */
