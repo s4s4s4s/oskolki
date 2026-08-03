@@ -101,30 +101,51 @@ const W_META = 1.35;
 
 // Авторитет источника: журналы и очередь упоминают всё подряд и топят заметки,
 // которые теме посвящены. Замер: 53% → 70% в топ-5.
+/* Слой атомарных утверждений весит больше: осколок ОБЯЗАН отвечать на вопрос
+   целиком, крупная заметка может лишь упоминать. Без этого веса на «дата
+   экзамена SAT» два осколка прямо про неё стояли пятым и шестым, а тройку
+   занимали планы, где те же слова встречаются двадцать раз по ходу текста. */
 const AUTHORITY = [
   [/^brain\/log\//i, 0.4],
   [/^_tools\/queue\//i, 0.4],
   [/^Учёба\/Лог сессий\//i, 0.4],
   [/^daily\//i, 0.7],
   [/^resources\//i, 0.85],
+  [/^осколки\//i, 1.4],
 ];
 export function authority(path) {
   for (const [re, w] of AUTHORITY) if (re.test(path)) return w;
   return 1;
 }
 
-export function scoreChunk(chunk, terms) {
-  let hits = 0, score = 0;
-  for (const term of terms) {
+/* Имена ниже намеренно совпадают с worker.js посимвольно, включая русские.
+   Это порт, и его единственная задача — не разойтись с оригиналом; одинаковые
+   имена делают расхождение видимым глазами, а не только через parity.mjs. */
+
+// Вклад каждого слова запроса в отдельности: нужен и для оценки, и для того,
+// чтобы посчитать, в скольких кусках слово вообще встречается.
+export function поСловам(chunk, terms) {
+  const из = new Array(terms.length).fill(0);
+  for (let i = 0; i < terms.length; i++) {
     let best = 0;
-    for (const variant of term) {
+    for (const variant of terms[i]) {
       for (const k of chunk.meta) { const m = stemsMatch(variant, k) * W_META; if (m > best) best = m; }
       for (const k of chunk.body) { const m = stemsMatch(variant, k) * W_BODY; if (m > best) best = m; }
     }
-    if (best > 0) hits++;
-    score += best;
+    из[i] = best;
+  }
+  return из;
+}
+
+export function scoreChunk(вклад, terms, idf) {
+  let hits = 0, score = 0;
+  for (let i = 0; i < вклад.length; i++) {
+    if (вклад[i] > 0) hits++;
+    score += вклад[i] * (idf ? idf[i] : 1);
   }
   if (!hits) return null;
+  // Покрытие запроса важнее веса: кусок, зацепивший все слова вопроса, полезнее
+  // длинного, зацепившего половину сильно.
   const coverage = hits / terms.length;
   return { score: score * coverage * coverage, coverage, hits };
 }
@@ -132,9 +153,27 @@ export function scoreChunk(chunk, terms) {
 export function rankFiles(chunks, query, synonyms, limit) {
   const terms = queryTerms(query, synonyms);
   if (!terms.length) return { files: [], terms };
+
+  /* Редкое слово весит больше частого — обычный IDF. Без него «система» из
+     вопроса «где лежит система памяти» весила столько же, сколько «pbcheck»:
+     первое встречается в сотнях кусков и не различает ничего, второе указывает
+     на файл почти однозначно.
+     Два прохода: первый считает вклад слов и в скольких кусках слово есть,
+     второй только складывает. */
+  const вклады = new Array(chunks.length);
+  const df = new Array(terms.length).fill(0);
+  for (let i = 0; i < chunks.length; i++) {
+    const в = поСловам(chunks[i], terms);
+    вклады[i] = в;
+    for (let t = 0; t < terms.length; t++) if (в[t] > 0) df[t]++;
+  }
+  const N = chunks.length || 1;
+  const idf = df.map((d) => Math.log(1 + N / (1 + d)));
+
   const byFile = new Map();
-  for (const c of chunks) {
-    const s = scoreChunk(c, terms);
+  for (let i = 0; i < chunks.length; i++) {
+    const c = chunks[i];
+    const s = scoreChunk(вклады[i], terms, idf);
     if (!s) continue;
     const cur = byFile.get(c.p);
     if (!cur) byFile.set(c.p, { p: c.p, best: { ...s, c }, n: 1 });
