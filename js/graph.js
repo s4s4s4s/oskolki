@@ -37,15 +37,39 @@ export class GraphView {
     // раз складывается одинаково и её можно запомнить глазами.
     this.nodes = model.notes.map(note => {
       const prev = old.get(note.path);
-      if (prev) return { note, x: prev.x, y: prev.y, vx: 0, vy: 0, r: 5, alpha: 1 };
-      const a = hash(note.path) * Math.PI * 2;
-      const rr = 40 + hash(note.path + '·') * 90;
-      return { note, x: Math.cos(a) * rr, y: Math.sin(a) * rr, vx: 0, vy: 0, r: 5, alpha: 1 };
+      return prev
+        ? { note, x: prev.x, y: prev.y, vx: 0, vy: 0, r: 5, alpha: 1, _new: false }
+        : { note, x: 0, y: 0, vx: 0, vy: 0, r: 5, alpha: 1, _new: true };
     });
     const idx = new Map(this.nodes.map(n => [n.note, n]));
     this.links = model.edges.map(e => ({ a: idx.get(e.a), b: idx.get(e.b) })).filter(l => l.a && l.b);
     this.selected = this.selected && idx.get(this.selected.note) || null;
-    this._applyAnchors(); this._applyStyle(); this.heat(1);
+
+    /* Якоря считаются ДО расстановки, а не после.
+
+       Раньше новые узлы ставились в кольцо радиусом до 130 вокруг центра, потому
+       что на момент создания их якорь ещё не был известен. А якорь созвездия
+       лежит на окружности радиусом больше тысячи — и каждый узел первые секунды
+       летел через весь экран. Комментарий обещал «ставим сразу рядом со своим
+       созвездием», но порядок вычислений это обещание не выполнял, и человек
+       видел взрыв на три секунды при каждом открытии карты.
+
+       Теперь узел появляется прямо на своём месте, а разброс вокруг него берётся
+       из хеша пути: он одинаков от запуска к запуску, поэтому карта складывается
+       каждый раз одинаково и её можно запомнить глазами. */
+    this._applyAnchors();
+    for (const n of this.nodes) {
+      if (!n._new) continue;
+      const a = hash(n.note.path) * Math.PI * 2;
+      const rr = 12 + hash(n.note.path + '·') * 46;   // чтобы не сели друг на друга
+      n.x = (n.ax || 0) + Math.cos(a) * rr;
+      n.y = (n.ay || 0) + Math.sin(a) * rr;
+      n._new = false;
+    }
+    this._applyStyle();
+    // Стартуем с малого нагрева: раскладка уже почти сложена, физике остаётся
+    // развести соседей, а не собирать карту заново.
+    this.heat(0.35);
   }
 
   // Секторы созвездий: угловая доля пропорциональна КОРНЮ числа заметок.
@@ -126,7 +150,12 @@ export class GraphView {
     }
     for (const n of N) n.offDeps = false;
     if (this.layout === 'zones') {
-      const R = 150 + N.length * 1.35;
+      /* Радиус — по числу ВИДИМЫХ узлов, а не всех подряд. В вальте 871 объект,
+         но 564 из них это карточки словаря и улики, выключенные по умолчанию.
+         Считая по всем, круг раздувался до радиуса 1300 при трёх сотнях точек на
+         экране: карта разъезжалась, и камере приходилось её собирать обратно. */
+      const видимых = N.reduce((k, n) => k + (isVisible(n.note) ? 1 : 0), 0) || N.length;
+      const R = 150 + видимых * 1.35;
       for (const { angle, zone } of sectors.values()) {
         zone._ax = Math.cos(angle) * R; zone._ay = Math.sin(angle) * R * .72;
       }
@@ -363,9 +392,16 @@ export class GraphView {
      не во что. Дешевле прокрутить физику молча (бюджет по времени, а не по
      числу шагов — на слабой машине лучше показать чуть менее устоявшуюся
      картинку, чем задержать окно). */
-  settle(budgetMs = 400) {
+  settle(budgetMs = 400, нагрев = null) {
     const until = performance.now() + budgetMs;
-    this.heat(1);
+    /* Нагрев не вздувается до максимума насильно.
+
+       Раньше здесь стояло `heat(1)` — и оно перечёркивало всю подготовку: узлы,
+       аккуратно поставленные на свои места, получали полную энергию и
+       разлетались заново, а человек видел ровно тот взрыв, ради устранения
+       которого settle и писался. Теперь берём то, что есть: после смены модели
+       это 0.35, после смены раскладки — сколько запросил вызвавший. */
+    if (нагрев != null) this.heat(нагрев);
     let steps = 0;
     while (performance.now() < until && this._heat > .02) { this._tick(); steps++; }
     // Гасим не только «нагрев», но и накопленные скорости: иначе первый же
@@ -771,7 +807,7 @@ export class GraphView {
   start() {
     if (this.running) return;
     this.running = true; this.resize();
-    this.settle();          // показываем уже сложившуюся карту, а не разлёт из точки
+    this.settle(500);       // показываем уже сложившуюся карту, а не разлёт из точки
     const loop = () => { if (!this.running) return; this._tick(); this._render(); this._raf = requestAnimationFrame(loop); };
     loop();
   }
